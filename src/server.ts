@@ -27,7 +27,7 @@ registerAnyGetTool(server, fmp);
 const app = express();
 app.use(express.json());
 
-// (선택) 브라우저 클라이언트용 CORS 헤더 설정
+// (선택) 브라우저 클라이언트용 CORS 헤더
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   res.setHeader(
@@ -46,7 +46,7 @@ app.get("/health", maybeProtectHealth(), (_req: Request, res: Response) => {
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 app.post("/mcp", requireApiKey(), async (req: Request, res: Response) => {
-  // 요청 헤더에서 세션ID 추출(Express는 헤더 키를 소문자로 보관)
+  // 요청 헤더에서 세션ID 추출(Express는 소문자 키)
   const hdr = req.headers["mcp-session-id"];
   const incomingSessionId = typeof hdr === "string" ? hdr : undefined;
 
@@ -70,19 +70,32 @@ app.post("/mcp", requireApiKey(), async (req: Request, res: Response) => {
       sessionIdGenerator: () => randomUUID(),
     });
     await server.connect(transport);
+
+    // 생성 직후 sessionId가 할당되는 구현 대비: 즉시 저장 시도
+    const sid0 = (transport as any).sessionId as string | undefined;
+    if (sid0) {
+      transports.set(sid0, transport);
+      // console.log("[MCP] session pre-registered:", sid0);
+    }
   }
 
   try {
     // 실제 처리
     await transport.handleRequest(req, res, req.body);
 
-    // initialize 응답 시 응답 헤더로 내려간 session id를 테이블에 저장
+    // 처리 후에도 sessionId 저장(초기화 응답 직후를 대비)
+    const sid1 = (transport as any).sessionId as string | undefined;
+    if (sid1 && !transports.has(sid1)) {
+      transports.set(sid1, transport);
+      // console.log("[MCP] session registered:", sid1);
+    }
+
+    // 혹시 응답 헤더에 기록된 경우도 수용(이중 안전장치)
     const sidHeader = res.getHeader("mcp-session-id");
-    const newSessionId = typeof sidHeader === "string" ? sidHeader : undefined;
-    if (newSessionId && !transports.has(newSessionId)) {
-      transports.set(newSessionId, transport);
-      // 필요하면 로깅:
-      // console.log("[MCP] session created:", newSessionId);
+    const sid2 = typeof sidHeader === "string" ? sidHeader : undefined;
+    if (sid2 && !transports.has(sid2)) {
+      transports.set(sid2, transport);
+      // console.log("[MCP] session registered from header:", sid2);
     }
   } catch (e) {
     if (!res.headersSent) {
@@ -95,7 +108,7 @@ app.post("/mcp", requireApiKey(), async (req: Request, res: Response) => {
   }
 });
 
-// STDIO 모드 지원(로컬 전용)
+// STDIO 모드(로컬 전용)
 if (process.env.STDIO === "1") {
   const transport = new StdioServerTransport();
   server.connect(transport).catch((e) => {
