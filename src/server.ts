@@ -7,6 +7,7 @@ import { registerAllTools } from "./registerTools.js";
 import { registerResources } from "./resources.js";
 import { registerAnyGetTool } from "./anyGet.js";
 import { FmpClient } from "./fmp.js";
+import { requireApiKey, maybeProtectHealth } from "./auth.js";
 
 function requireEnv(name: string) {
   const v = process.env[name];
@@ -24,8 +25,12 @@ registerAnyGetTool(server, fmp);
 // Health probe
 const app = express();
 app.use(express.json());
-app.get("/health", (_req, res) => res.status(200).send("ok"));
-app.post("/mcp", async (req, res) => {
+
+// ✅ 헬스 체크 (옵션 보호)
+app.get("/health", maybeProtectHealth(), (_req, res) => res.status(200).send("ok"));
+
+// ✅ MCP HTTP 엔드포인트 (키 필요)
+app.post("/mcp", requireApiKey(), async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
   res.on("close", () => transport.close());
   await server.connect(transport);
