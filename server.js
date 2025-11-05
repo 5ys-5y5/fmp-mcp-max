@@ -26,6 +26,29 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// CORS + Preflight hardening
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['*']
+}));
+
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,HEAD');
+  res.setHeader('Access-Control-Allow-Headers',
+    req.get('Access-Control-Request-Headers') || '*');
+  res.status(204).end();
+});
+
+// Some clients send HEAD to check availability
+app.head('/mcp', gate, (_req, res) => {
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('cache-control', 'no-store');
+  res.status(200).end();
+});
+
+
 // --- CORS & Preflight/HEAD hardening (for ChatGPT connector UI) -----------
 app.use(cors({
   origin: '*',
