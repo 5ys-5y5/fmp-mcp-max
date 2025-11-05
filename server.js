@@ -196,7 +196,7 @@ app.get('/health', (_req, res) => {
 // List tools (what ChatGPT shows under "액션")
 const MAX_TOOLS = Number(process.env.MAX_TOOLS || 800);
 
-// ❗ GET /mcp 는 공개 (no gate) — 온보딩에서 키 없이도 읽을 수 있게
+// ❗ GET /mcp 는 공개 — 온보딩에서 키 없이도 읽을 수 있게
 app.get('/mcp', (_req, res) => {
   const tools = Object.values(TOOLS)
     .slice(0, MAX_TOOLS)
@@ -218,44 +218,13 @@ app.get('/mcp', (_req, res) => {
 
 
 
-// Invoke tool — POST /mcp/:toolName
-app.post('/mcp/:name', gate, async (req, res) => {
-  const name = req.params.name;
-  const tool = TOOLS[name];
-  if (!tool) return res.status(404).json({ error: `unknown tool: ${name}` });
 
-  try {
-    const args = req.body?.arguments || req.body || {};
-    const query = args.query || {};
-
-    // Allow smart shorthand: if tool has a :symbol form, append args.symbol
-    let path = tool.metadata.path;
-    if (args.symbol && /\/:symbol$/.test(path)) {
-      path = path.replace(/:symbol$/, encodeURIComponent(args.symbol));
-    }
-
-    const out = await callFmp(path, query);
-
-    // MCP over HTTP: return toolResult-like payload
-    res.json({
-      content: [
-        {
-          type: 'json',
-          json: out
-        }
-      ]
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message || String(e) });
-  }
-});
-
-// Start listening immediately
+// Start listening immediately (non-blocking boot)
 app.listen(PORT, () => {
   console.log(`[FMP MCP] listening on :${PORT}`);
 });
 
-// Seed tools immediately so /mcp works even during cold start
+// Seed tools immediately so /mcp works during cold start
 function installSeedTools() {
   TOOLS = {};
   for (const p of SEED_ENDPOINTS) {
@@ -264,7 +233,7 @@ function installSeedTools() {
   TOOLS['fmp_request'] = {
     name: 'fmp_request',
     description:
-      'Generic FMP request. Provide path like "/api/v3/quote" and optional query object.',
+      'Generic FMP request. Provide path like "/api/v3/quote" and optional query object (e.g., { symbol: "AAPL" }).',
     input_schema: {
       type: 'object',
       properties: {
@@ -278,20 +247,20 @@ function installSeedTools() {
   };
 }
 
-// Background boot to expand tools
+// Background boot: upgrade to full tool list after the server is up
 async function bootAsync() {
   try {
-    installSeedTools();                 // 즉시 응답 가능
+    installSeedTools();
     if (process.env.SEED_ONLY === '1') return;
 
-    const paths = await discoverEndpoints(); // 백그라운드 확장
+    const paths = await discoverEndpoints();
     const next = {};
     for (const p of paths) next[toolNameFromPath(p)] = buildToolDescriptor(p);
     next['fmp_request'] = TOOLS['fmp_request'];
     TOOLS = next;
     console.log(`[FMP MCP] tools ready — ${Object.keys(TOOLS).length} tools`);
   } catch (e) {
-    console.warn('[bootAsync] keeping seed tools:', e.message);
+    console.warn('[bootAsync] keeping seed tools due to error:', e.message);
   }
 }
 bootAsync();
