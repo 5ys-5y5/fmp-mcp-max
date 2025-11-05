@@ -194,23 +194,28 @@ app.get('/health', (_req, res) => {
 });
 
 // List tools (what ChatGPT shows under "액션")
-const MAX_TOOLS = Number(process.env.MAX_TOOLS || 600); // 초기 등록 가볍게
+const MAX_TOOLS = Number(process.env.MAX_TOOLS || 800);
 
-app.get('/mcp', gate, (_req, res) => {
-  const tools = Object.values(TOOLS).slice(0, MAX_TOOLS).map(t => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.input_schema
-  }));
+// ❗ GET /mcp 는 공개 (no gate) — 온보딩에서 키 없이도 읽을 수 있게
+app.get('/mcp', (_req, res) => {
+  const tools = Object.values(TOOLS)
+    .slice(0, MAX_TOOLS)
+    .map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.input_schema
+    }));
+
   res.setHeader('content-type', 'application/json; charset=utf-8');
   res.setHeader('cache-control', 'no-store');
   res.json({
-    mcp: { version: '2024-11-01' }, // 호환성 메타(문제 시 제거해도 무방)
+    mcp: { version: '2024-11-01' },
     name: 'FMP_MCP',
     version: '2.0.0',
     tools
   });
 });
+
 
 
 // Invoke tool — POST /mcp/:toolName
