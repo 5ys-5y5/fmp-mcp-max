@@ -1,0 +1,26 @@
+{
+  "name": "fmp-mcp-max",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "start": "node --enable-source-maps --experimental-strip-types --no-warnings src/server.ts",
+    "smoke": "tsx src/smoke.ts",
+    "lint": "echo \"(optional) add eslint config\" && exit 0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.2.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3",
+    "@types/node": "^20.11.30"
+  }
+}
