@@ -109,9 +109,6 @@ app.post("/mcp", async (req, res) => {
   };
   res.write(JSON.stringify(hello) + "\n");
 
-  // 클라이언트 요청(JSON-RPC) 파싱은 필요 시 여기에…
-  // const body = req.body || {};
-
   // 주기적 ping (테스트 편의를 위해 2회 전송 후 종료)
   let count = 0;
   const timer = setInterval(() => {

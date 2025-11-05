@@ -1,7 +1,6 @@
 {
   "name": "fmp-mcp-max",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22 <25"
@@ -9,14 +8,11 @@
   "scripts": {
     "dev": "nodemon --watch server.js --ext js,json --exec \"node server.js\"",
     "start": "node server.js",
-    "build": "node -e \"console.log('no build step needed')\""
+    "build": "node -e \"console.log('no build step')\""
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "node-cache": "^5.1.2",
-    "zod": "^3.23.8",
-    "node-fetch": "^3.3.2"
+    "express": "^4.21.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
