@@ -1,23 +1,20 @@
 {
   "name": "fmp-mcp-max",
-  "version": "0.1.0",
+  "version": "3.0.0",
+  "description": "MCP HTTP server for FinancialModelingPrep (FMP) with generic request tool covering all endpoints",
   "private": true,
-  "description": "Minimal MCP HTTP+SSE server for GPT connector",
-  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22 <25"
+  },
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon --watch server.js --ext js,json --exec \"node server.js\"",
-    "build": "echo \"no build step\""
+    "dev": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "morgan": "^1.10.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.10"
-  },
-  "engines": {
-    "node": ">=18 <25"
+    "express": "^4.21.1",
+    "morgan": "^1.10.0",
+    "uuid": "^11.0.3"
   }
 }
