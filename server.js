@@ -224,16 +224,17 @@ app.post('/mcp/:name', gate, async (req, res) => {
   }
 });
 
-// Boot: discover and build tool table
-async function boot() {
-  const paths = await discoverEndpoints();
+// Start listening immediately (non-blocking boot)
+app.listen(PORT, () => {
+  console.log(`[FMP MCP] listening on :${PORT}`);
+});
+
+// Seed tools immediately so /mcp works even during cold start
+function installSeedTools() {
   TOOLS = {};
-  // Create an action per endpoint
-  for (const p of paths) {
+  for (const p of SEED_ENDPOINTS) {
     TOOLS[toolNameFromPath(p)] = buildToolDescriptor(p);
   }
-
-  // Generic super-tool (always present)
   TOOLS['fmp_request'] = {
     name: 'fmp_request',
     description:
@@ -249,25 +250,23 @@ async function boot() {
     },
     metadata: { method: 'GET', path: '/__dynamic__' }
   };
-
-  // Bind generic executor at the same route shape
-  app.post('/mcp/fmp_request', gate, async (req, res) => {
-    try {
-      const args = req.body?.arguments || req.body || {};
-      if (!args.path) return res.status(400).json({ error: 'missing path' });
-      const out = await callFmp(args.path, args.query || {});
-      res.json({ content: [{ type: 'json', json: out }] });
-    } catch (e) {
-      res.status(500).json({ error: e.message || String(e) });
-    }
-  });
-
-  app.listen(PORT, () => {
-    console.log(`[FMP MCP] listening on :${PORT}`);
-  });
 }
 
-boot().catch((e) => {
-  console.error('Failed to boot MCP server:', e);
-  process.exit(1);
-});
+// Background boot: upgrade to full tool list after the server is already up
+async function bootAsync() {
+  try {
+    installSeedTools(); // respond fast right away
+    if (process.env.SEED_ONLY === '1') return; // optional: stay on seeds only
+
+    const paths = await discoverEndpoints(); // may take seconds on cold start
+    // rebuild tools with discovered endpoints
+    const next = {};
+    for (const p of paths) next[toolNameFromPath(p)] = buildToolDescriptor(p);
+    next['fmp_request'] = TOOLS['fmp_request']; // keep generic tool
+    TOOLS = next;
+    console.log(`[FMP MCP] tools ready — ${Object.keys(TOOLS).length} tools`);
+  } catch (e) {
+    console.warn('[bootAsync] keeping seed tools due to error:', e.message);
+  }
+}
+bootAsync();
