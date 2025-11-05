@@ -1,402 +1,281 @@
 // server.js
-// FMP(https://financialmodelingprep.com) 모든 엔드포인트를 호출할 수 있는
-// 제너릭 MCP-over-HTTP(JSON-RPC) 서버
-//
-// - /mcp : JSON-RPC 2.0
-// - tools:
-//     * fmp.request  -> 모든 FMP 엔드포인트 지원 (GET/POST, 쿼리파라미터, 바디)
-//     * fmp.get      -> GET 전용 편의 래퍼
-//     * fmp.batch    -> 여러 요청을 한 번에
-//
-// 배포 전 환경변수 설정 권장:
-//   FMP_API_KEY        : FMP API 키 (권장, 있으면 자동으로 쿼리에 붙여줌)
-//   APP_API_KEY        : (선택) 서버 보호용 키. 없으면 공개 엔드포인트
-//   APP_PROTECT_HEALTH : "1"이면 /health도 보호
-//
-// Render 설정:
-//   Build Command  : npm ci
-//   Start Command  : node server.js
-//   Health Check   : /health
+// FMP MCP HTTP 서버 (JSON-RPC 2.0, GPT MCP 호환)
+// 모든 FMP 엔드포인트를 단일 액션(fmp.request)으로 프록시 호출합니다.
 
 const express = require("express");
 const cors = require("cors");
-const morgan = require("morgan");
-const { randomUUID } = require("uuid");
-const http = require("http");
+const { randomUUID: _rand } = require("crypto");
 
-// -------------------- Config --------------------
-const PORT = Number(process.env.PORT || 3000);
+// ---- 설정 ----
+const PORT = Number(process.env.PORT || 10000);
+const APP_API_KEY = process.env.APP_API_KEY || ""; // 서버 보호용(선택)
+const FMP_API_KEY = process.env.FMP_API_KEY || ""; // FMP 키(강력 권장)
+const FMP_BASE = process.env.FMP_BASE || "https://financialmodelingprep.com"; // 기본 도메인
 
-// 보호용 키(?key= 또는 x-api-key 헤더)
-const APP_API_KEY = (process.env.APP_API_KEY || "").trim();
-const APP_PROTECT_HEALTH = (process.env.APP_PROTECT_HEALTH || "0").trim() === "1";
+// ---- 유틸 ----
+function makeUUID() {
+  try {
+    if (typeof _rand === "function") return _rand();
+    // 일부 런타임에서 전역 crypto.randomUUID가 있을 수도 있음
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch {}
+  // 폴백(충돌 방지)
+  return `sid-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
-// FMP API
-const FMP_API_KEY = (process.env.FMP_API_KEY || "").trim();
-const FMP_BASE = "https://financialmodelingprep.com/api"; // /v1, /v3, /v4 등 모두 지원
+function ok(res, result, id = null) {
+  res.json({ jsonrpc: "2.0", result, id });
+}
 
-// 타임아웃(밀리초)
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 25000);
+function err(res, code, message, id = null) {
+  res.status(code === -32601 ? 404 : 400).json({
+    jsonrpc: "2.0",
+    error: { code, message },
+    id,
+  });
+}
 
-// -------------------- App --------------------
+// path 정규화: "v3/quote/AAPL", "/api/v3/quote/AAPL" 모두 허용
+function buildFmpUrl(path, params = {}) {
+  let p = String(path || "").trim();
+  if (!p) throw new Error("path is required");
+
+  // 앞의 / 제거
+  if (p.startsWith("/")) p = p.slice(1);
+
+  // /api/ 접두사 보정
+  if (!p.startsWith("api/") && (p.startsWith("v") || p.startsWith("version"))) {
+    p = `api/${p}`;
+  }
+
+  // 최종 URL
+  const url = new URL(`${FMP_BASE}/${p}`);
+
+  // 쿼리 병합 (apikey 자동 주입)
+  const q = new URLSearchParams(params || {});
+  const hasKey =
+    q.has("apikey") || q.has("apiKey") || q.has("key") || q.has("token");
+  if (!hasKey && FMP_API_KEY) q.set("apikey", FMP_API_KEY);
+
+  for (const [k, v] of q.entries()) url.searchParams.set(k, v);
+  return url.toString();
+}
+
+// ---- 서버 ----
 const app = express();
-app.set("trust proxy", true);
-app.use(express.json({ limit: "2mb" }));
-app.use(
-  cors({
-    origin: "*",
-    exposedHeaders: ["mcp-session-id"]
-  })
-);
-app.use(morgan("tiny"));
+app.use(cors({ origin: "*", exposedHeaders: ["mcp-session-id"] }));
+app.use(express.json({ limit: "1mb" }));
 
-// -------------------- Helpers --------------------
-function getApiKeyFromReq(req) {
-  const hdrKey = req.get("x-api-key");
-  if (hdrKey) return hdrKey.trim();
-
-  const auth = req.get("authorization");
-  if (auth && /^bearer\s+/i.test(auth)) {
-    return auth.replace(/^bearer\s+/i, "").trim();
-  }
-
-  if (req.query && typeof req.query.key === "string") {
-    return req.query.key.trim();
-  }
-  return "";
-}
-
-function requireApiKey(req, res, next) {
-  if (!APP_API_KEY) return next(); // 잠금 안 함
-  const provided = getApiKeyFromReq(req);
-  if (!provided || provided !== APP_API_KEY) {
-    return res
-      .status(401)
-      .json({ error: "unauthorized", hint: "provide x-api-key header or ?key=..." });
-  }
+// 간단한 로거 (필요 시 주석 처리)
+app.use((req, _res, next) => {
+  console.log(`${req.method} ${req.url}`);
   next();
+});
+
+// 보호용 API 키(선택). APP_API_KEY가 설정된 경우에만 검사.
+function requireApiKey(req, res, next) {
+  if (!APP_API_KEY) return next(); // 보호 OFF
+  const key =
+    req.get("x-api-key") ||
+    req.query.key ||
+    (req.body && req.body.key) ||
+    "";
+  if (key && String(key) === String(APP_API_KEY)) return next();
+  return res.status(401).json({ error: "Unauthorized (invalid key)" });
 }
 
-const sessions = new Map(); // sessionId -> { initialized: boolean, createdAt: number }
+// 세션 헤더 보장
 function getOrCreateSession(req, res) {
   let sid = req.get("mcp-session-id");
-  if (!sid) sid = randomUUID();
-  if (!sessions.has(sid)) sessions.set(sid, { initialized: false, createdAt: Date.now() });
+  if (!sid) sid = makeUUID();
   res.set("mcp-session-id", sid);
-  return { sid, state: sessions.get(sid) };
+  return sid;
 }
 
-function rpcResult(id, result) {
-  return { jsonrpc: "2.0", id, result };
-}
-function rpcError(id, code, message, data) {
-  const err = { jsonrpc: "2.0", id, error: { code, message } };
-  if (data !== undefined) err.error.data = data;
-  return err;
-}
-
-// -------------------- FMP utils --------------------
-function normalizePath(p) {
-  // 입력 예:
-  //  "v3/quote/AAPL"   -> "/v3/quote/AAPL"
-  //  "/v4/something"   -> 그대로
-  //  "quote/AAPL"      -> 기본 "/v3/quote/AAPL"
-  let path = String(p || "").trim();
-  if (!path) throw new Error("path is required");
-  if (!path.startsWith("/")) path = "/" + path;
-  if (!/^\/v\d+\//.test(path)) path = "/v3" + (path === "/" ? "" : path);
-  return path;
-}
-
-function toQueryString(obj) {
-  const qs = new URLSearchParams();
-  if (obj && typeof obj === "object") {
-    for (const [k, v] of Object.entries(obj)) {
-      if (v === undefined || v === null) continue;
-      qs.append(k, String(v));
-    }
-  }
-  return qs.toString();
-}
-
-function buildUrl({ path, params }) {
-  const vpath = normalizePath(path);
-  const qp = { ...(params || {}) };
-
-  // apikey가 명시되지 않았다면 서버의 FMP_API_KEY 자동 추가
-  const hasApiKey = Object.keys(qp).some((k) => k.toLowerCase() === "apikey");
-  if (!hasApiKey && FMP_API_KEY) qp.apikey = FMP_API_KEY;
-
-  const qs = toQueryString(qp);
-  return `${FMP_BASE}${vpath}${qs ? "?" + qs : ""}`;
-}
-
-async function fetchWithTimeout(url, opts = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...opts, signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-async function doFmpRequest({ method = "GET", path, params, body, headers, timeoutMs }) {
-  const url = buildUrl({ path, params });
-  const m = String(method || "GET").toUpperCase();
-
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: m,
-      headers: {
-        "Content-Type": "application/json",
-        ...(headers || {})
-      },
-      body: m === "GET" || m === "HEAD" ? undefined : body ? JSON.stringify(body) : undefined
-    },
-    timeoutMs ? Number(timeoutMs) : REQUEST_TIMEOUT_MS
-  );
-
-  const ctype = (res.headers.get("content-type") || "").toLowerCase();
-  let data;
-  if (ctype.includes("application/json")) {
-    data = await res.json();
-  } else {
-    data = await res.text();
-  }
-
-  if (!res.ok) {
-    const msg = typeof data === "string" ? data : JSON.stringify(data);
-    throw new Error(`FMP HTTP ${res.status}: ${msg}`);
-  }
-
-  return data;
-}
-
-// -------------------- MCP server meta --------------------
-const SERVER_INFO = { name: "fmp-mcp-max", version: "3.0.0" };
-const MCP_CAPABILITIES = { tools: {} };
-
-// 유저가 보기 쉬운 기본 도구들
-const TOOLS = [
-  {
-    name: "fmp.request",
-    description:
-      "Call ANY FMP endpoint (all versions). Example path: 'v3/quote/AAPL' or 'v4/financial-growth/AAPL'. Supports GET/POST.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        method: { type: "string", enum: ["GET", "POST"], default: "GET" },
-        path: { type: "string", description: "FMP path. Accepts 'v3/...', '/v3/...', 'quote/AAPL' (auto /v3)" },
-        params: { type: "object", description: "Query params (apikey auto-added if missing)" },
-        body: { type: "object", description: "JSON body for POST if needed" },
-        headers: { type: "object", description: "Optional extra headers" },
-        timeoutMs: { type: "number", description: "Request timeout ms (default 25000)" }
-      },
-      required: ["path"]
-    }
-  },
-  {
-    name: "fmp.get",
-    description: "Convenience GET wrapper. Example: path='quote/AAPL' or 'v4/profile/AAPL', params={}.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        params: { type: "object" },
-        timeoutMs: { type: "number" }
-      },
-      required: ["path"]
-    }
-  },
-  {
-    name: "fmp.batch",
-    description:
-      "Batch multiple FMP requests at once. Input: { requests: [ {method?, path, params?, body?, headers?, timeoutMs?}, ... ] }",
-    inputSchema: {
-      type: "object",
-      properties: {
-        requests: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              method: { type: "string", enum: ["GET", "POST"] },
-              path: { type: "string" },
-              params: { type: "object" },
-              body: { type: "object" },
-              headers: { type: "object" },
-              timeoutMs: { type: "number" }
-            },
-            required: ["path"]
-          }
-        }
-      },
-      required: ["requests"]
-    }
-  }
-];
-
-// -------------------- Routes --------------------
-
-// 건강 체크
-app.get(
-  "/health",
-  APP_PROTECT_HEALTH ? requireApiKey : (req, res, next) => next(),
-  (req, res) => {
-    res.json({ status: "ok", fmpKey: FMP_API_KEY ? "set" : "missing" });
-  }
+// 헬스체크
+app.get("/", (_req, res) =>
+  res.status(200).send("FMP MCP (HTTP) is running. POST /mcp")
 );
+app.head("/", (_req, res) => res.status(200).end());
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-// 사전 점검(OPTIONS)
-app.options("/mcp", requireApiKey, (req, res) => {
+// CORS 프리플라이트
+app.options("/mcp", (_req, res) => {
   res.set("Allow", "POST");
   res.status(200).send("POST");
 });
 
-// MCP 본체
-app.post("/mcp", requireApiKey, async (req, res) => {
-  const { state } = getOrCreateSession(req, res);
+// MCP 엔드포인트
+app.all("/mcp", requireApiKey, async (req, res) => {
+  const sid = getOrCreateSession(req, res);
 
-  if (!req.is("application/json")) {
+  if (req.method !== "POST") {
+    // GPT가 GET으로 서버 특성 확인하는 경우 200으로 가볍게 응답
     return res
-      .status(415)
-      .json({ jsonrpc: "2.0", error: { code: -32600, message: "Invalid Request: JSON only" }, id: null });
+      .status(200)
+      .send(`MCP ready (session=${sid}). Use POST with JSON-RPC 2.0.`);
   }
 
-  const body = req.body;
-  const isBatch = Array.isArray(body);
-  const messages = isBatch ? body : [body];
-  const replies = [];
+  const body = req.body || {};
+  const { id = null, method, params = {} } = body;
 
-  for (const msg of messages) {
-    const hasId = Object.prototype.hasOwnProperty.call(msg || {}, "id");
-    const id = hasId ? msg.id : null;
-
-    if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
-      if (hasId) replies.push(rpcError(id, -32600, "Invalid Request"));
-      continue;
-    }
-
-    try {
-      switch (msg.method) {
-        case "initialize": {
-          state.initialized = true;
-          replies.push(
-            rpcResult(id, {
-              protocolVersion: "2025-01-01",
-              capabilities: MCP_CAPABILITIES,
-              serverInfo: SERVER_INFO
-            })
-          );
-          break;
-        }
-
-        case "tools/list": {
-          if (!state.initialized) {
-            replies.push(rpcError(id, -32000, "Server not initialized"));
-            break;
-          }
-          replies.push(rpcResult(id, { tools: TOOLS }));
-          break;
-        }
-
-        case "tools/call": {
-          if (!state.initialized) {
-            replies.push(rpcError(id, -32000, "Server not initialized"));
-            break;
-          }
-          const { name, arguments: args } = msg.params || {};
-          try {
-            let data;
-
-            if (name === "fmp.request") {
-              const { method = "GET", path, params, body, headers, timeoutMs } = args || {};
-              data = await doFmpRequest({ method, path, params, body, headers, timeoutMs });
-            } else if (name === "fmp.get") {
-              const { path, params, timeoutMs } = args || {};
-              data = await doFmpRequest({ method: "GET", path, params, timeoutMs });
-            } else if (name === "fmp.batch") {
-              const { requests } = args || {};
-              if (!Array.isArray(requests) || requests.length === 0) throw new Error("requests is empty");
-              const results = [];
-              for (const r of requests) {
-                try {
-                  const d = await doFmpRequest({
-                    method: r.method || "GET",
-                    path: r.path,
-                    params: r.params,
-                    body: r.body,
-                    headers: r.headers,
-                    timeoutMs: r.timeoutMs
-                  });
-                  results.push({ ok: true, data: d });
-                } catch (e) {
-                  results.push({ ok: false, error: String(e && e.message || e) });
-                }
-              }
-              data = results;
-            } else {
-              replies.push(rpcError(id, -32601, `Tool not found: ${name}`));
-              break;
-            }
-
-            replies.push(
-              rpcResult(id, {
-                content: [{ type: "json", json: data }]
-              })
-            );
-          } catch (toolErr) {
-            replies.push(
-              rpcError(id, -32002, "Tool execution failed", { message: String(toolErr && toolErr.message || toolErr) })
-            );
-          }
-          break;
-        }
-
-        // 리소스 기능 미사용
-        case "resources/list":
-          if (!state.initialized) {
-            replies.push(rpcError(id, -32000, "Server not initialized"));
-            break;
-          }
-          replies.push(rpcResult(id, { resources: [] }));
-          break;
-
-        case "resources/read":
-          if (!state.initialized) {
-            replies.push(rpcError(id, -32000, "Server not initialized"));
-            break;
-          }
-          replies.push(rpcError(id, -32601, "No resources available"));
-          break;
-
-        default:
-          if (hasId) replies.push(rpcError(id, -32601, `Method not found: ${msg.method}`));
+  try {
+    switch (method) {
+      case "initialize": {
+        return ok(res, {
+          protocolVersion: "2024-11-01",
+          serverInfo: {
+            name: "fmp-mcp-max",
+            version: "1.0.0",
+          },
+          capabilities: {
+            tools: { listChanged: true },
+          },
+        }, id);
       }
-    } catch (e) {
-      if (hasId) replies.push(rpcError(id, -32603, "Internal error", { message: String(e && e.message || e) }));
+
+      case "ping": {
+        return ok(res, { now: new Date().toISOString(), session: sid }, id);
+      }
+
+      case "tools/list": {
+        // 단일 범용 액션: 모든 FMP 엔드포인트를 지원
+        return ok(
+          res,
+          {
+            tools: [
+              {
+                name: "fmp.request",
+                description:
+                  "Call ANY Financial Modeling Prep endpoint. Example: {\"method\":\"GET\",\"path\":\"v3/quote/AAPL\"}",
+                input_schema: {
+                  type: "object",
+                  properties: {
+                    method: {
+                      type: "string",
+                      enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                      default: "GET",
+                    },
+                    path: { type: "string", description: "e.g. v3/quote/AAPL or api/v3/quote/AAPL" },
+                    params: {
+                      type: "object",
+                      description:
+                        "Query/body params. apikey is auto-injected from server unless you override it.",
+                      additionalProperties: true,
+                    },
+                    headers: {
+                      type: "object",
+                      description: "Optional extra headers to FMP.",
+                      additionalProperties: true,
+                    },
+                    body: {
+                      type: ["object", "string", "null"],
+                      description:
+                        "Raw body for non-GET calls. If object is given, it will be JSON-encoded.",
+                      default: null,
+                    },
+                  },
+                  required: ["path"],
+                },
+              },
+            ],
+          },
+          id
+        );
+      }
+
+      case "tools/call": {
+        const { name, arguments: args = {} } = params;
+        if (name !== "fmp.request") {
+          return err(res, -32601, `Unknown tool: ${name}`, id);
+        }
+
+        const method = String(args.method || "GET").toUpperCase();
+        const path = String(args.path || "");
+        const q = args.params || {};
+        const extraHeaders = args.headers || {};
+        const rawBody = args.body ?? null;
+
+        if (!path) return err(res, -32602, "path is required", id);
+
+        const url = buildFmpUrl(path, q);
+        const headers = {
+          Accept: "application/json",
+          ...extraHeaders,
+        };
+
+        let fetchBody = undefined;
+        if (method !== "GET" && method !== "HEAD") {
+          if (rawBody && typeof rawBody === "object") {
+            headers["Content-Type"] = "application/json";
+            fetchBody = JSON.stringify(rawBody);
+          } else if (typeof rawBody === "string") {
+            fetchBody = rawBody; // 사용자가 직접 Content-Type 지정 가능
+          }
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 55_000); // 55s 타임아웃
+        let status = 0;
+        let text = "";
+        try {
+          const r = await fetch(url, {
+            method,
+            headers,
+            body: fetchBody,
+            signal: controller.signal,
+          });
+          status = r.status;
+          text = await r.text();
+          clearTimeout(timeout);
+        } catch (e) {
+          clearTimeout(timeout);
+          return err(
+            res,
+            -32000,
+            `FMP request failed: ${e && e.message ? e.message : String(e)}`,
+            id
+          );
+        }
+
+        // JSON 시도 → 실패하면 원문 반환
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+
+        return ok(
+          res,
+          {
+            request: { url, method, sentHeaders: headers },
+            response: { status, data },
+          },
+          id
+        );
+      }
+
+      default:
+        return err(res, -32601, `Unknown method: ${method}`, id);
     }
+  } catch (e) {
+    return err(
+      res,
+      -32000,
+      `Server error: ${e && e.message ? e.message : String(e)}`,
+      id
+    );
   }
-
-  if (replies.length === 0) return res.status(204).end();
-  if (isBatch) return res.json(replies);
-  return res.json(replies[0]);
 });
 
-// 루트
-app.get("/", (req, res) => {
-  res.type("text/plain").send("MCP FMP server running. Use POST /mcp");
+// 서버 시작
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`FMP MCP (HTTP) on http://0.0.0.0:${PORT}/mcp`);
 });
 
-// -------------------- Start --------------------
-const server = http.createServer(app);
-server.keepAliveTimeout = 70_000;
-server.headersTimeout = 75_000;
-server.requestTimeout = 60_000;
-
-server.listen(PORT, () => {
-  console.log(`[MCP] Server listening on port ${PORT}`);
-});
+// 커넥션 안정성(타임아웃 튜닝)
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;

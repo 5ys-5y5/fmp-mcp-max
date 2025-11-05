@@ -1,20 +1,22 @@
 {
   "name": "fmp-mcp-max",
-  "version": "3.0.0",
-  "description": "MCP HTTP server for FinancialModelingPrep (FMP) with generic request tool covering all endpoints",
+  "version": "1.0.0",
   "private": true,
-  "type": "commonjs",
-  "engines": {
-    "node": ">=22 <25"
-  },
+  "description": "MCP server that can call ANY Financial Modeling Prep API endpoint via a single universal tool (fmp.request).",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "nodemon --watch server.js --ext js,json --exec \"node server.js\"",
+    "build": "node -e \"console.log('no build step')\""
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.21.1",
-    "morgan": "^1.10.0",
-    "uuid": "^11.0.3"
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
   }
 }
