@@ -1,20 +1,23 @@
 {
   "name": "fmp-mcp-max",
   "version": "0.1.0",
-  "type": "module",
-  "engines": {
-    "node": ">=22 <25"
-  },
+  "private": true,
+  "description": "Minimal MCP HTTP+SSE server for GPT connector",
+  "main": "server.js",
   "scripts": {
-    "dev": "nodemon --watch server.js --ext js,json --exec \"node server.js\"",
     "start": "node server.js",
-    "build": "node -e \"console.log('no build step')\""
+    "dev": "nodemon --watch server.js --ext js,json --exec \"node server.js\"",
+    "build": "echo \"no build step\""
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.21.1"
+    "express": "^4.19.2",
+    "morgan": "^1.10.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
+  },
+  "engines": {
+    "node": ">=18 <25"
   }
 }
