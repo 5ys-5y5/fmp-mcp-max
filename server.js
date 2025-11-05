@@ -42,19 +42,11 @@ app.options('*', (req, res) => {
 });
 
 // Some clients send HEAD to check availability
-app.head('/mcp', gate, (_req, res) => {
+app.head('/mcp', (_req, res) => {
   res.setHeader('content-type', 'application/json; charset=utf-8');
   res.setHeader('cache-control', 'no-store');
   res.status(200).end();
 });
-
-
-// --- CORS & Preflight/HEAD hardening (for ChatGPT connector UI) -----------
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-api-key']
-}));
 
 // Ensure preflight succeeds universally
 app.options('*', cors());
