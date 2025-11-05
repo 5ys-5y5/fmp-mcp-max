@@ -194,20 +194,18 @@ app.get('/health', (_req, res) => {
 });
 
 // List tools (what ChatGPT shows under "액션")
-const MAX_TOOLS = Number(process.env.MAX_TOOLS || 800);
+const MAX_TOOLS = Number(process.env.MAX_TOOLS || 600); // 초기 등록 가볍게
 
 app.get('/mcp', gate, (_req, res) => {
-  const tools = Object.values(TOOLS)
-    .slice(0, MAX_TOOLS)
-    .map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.input_schema
-    }));
-
+  const tools = Object.values(TOOLS).slice(0, MAX_TOOLS).map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema
+  }));
   res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('cache-control', 'no-store');
   res.json({
-    mcp: { version: '2024-11-01' }, // 메타 추가(권장)
+    mcp: { version: '2024-11-01' }, // 호환성 메타(문제 시 제거해도 무방)
     name: 'FMP_MCP',
     version: '2.0.0',
     tools
@@ -247,7 +245,7 @@ app.post('/mcp/:name', gate, async (req, res) => {
   }
 });
 
-// Start listening immediately (non-blocking boot)
+// Start listening immediately
 app.listen(PORT, () => {
   console.log(`[FMP MCP] listening on :${PORT}`);
 });
@@ -261,7 +259,7 @@ function installSeedTools() {
   TOOLS['fmp_request'] = {
     name: 'fmp_request',
     description:
-      'Generic FMP request. Provide path like "/api/v3/quote" and optional query object (e.g., { symbol: "AAPL" }).',
+      'Generic FMP request. Provide path like "/api/v3/quote" and optional query object.',
     input_schema: {
       type: 'object',
       properties: {
@@ -275,21 +273,20 @@ function installSeedTools() {
   };
 }
 
-// Background boot: upgrade to full tool list after the server is already up
+// Background boot to expand tools
 async function bootAsync() {
   try {
-    installSeedTools(); // respond fast right away
-    if (process.env.SEED_ONLY === '1') return; // optional: stay on seeds only
+    installSeedTools();                 // 즉시 응답 가능
+    if (process.env.SEED_ONLY === '1') return;
 
-    const paths = await discoverEndpoints(); // may take seconds on cold start
-    // rebuild tools with discovered endpoints
+    const paths = await discoverEndpoints(); // 백그라운드 확장
     const next = {};
     for (const p of paths) next[toolNameFromPath(p)] = buildToolDescriptor(p);
-    next['fmp_request'] = TOOLS['fmp_request']; // keep generic tool
+    next['fmp_request'] = TOOLS['fmp_request'];
     TOOLS = next;
     console.log(`[FMP MCP] tools ready — ${Object.keys(TOOLS).length} tools`);
   } catch (e) {
-    console.warn('[bootAsync] keeping seed tools due to error:', e.message);
+    console.warn('[bootAsync] keeping seed tools:', e.message);
   }
 }
 bootAsync();
