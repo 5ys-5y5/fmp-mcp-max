@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { randomUUID } from "node:crypto"; // ⬅ 추가
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -31,7 +32,10 @@ app.get("/health", maybeProtectHealth(), (_req, res) => res.status(200).send("ok
 
 // ✅ MCP HTTP 엔드포인트 (키 필요)
 app.post("/mcp", requireApiKey(), async (req, res) => {
-  const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
+  const transport = new StreamableHTTPServerTransport({
+    enableJsonResponse: true,
+    sessionIdGenerator: () => randomUUID(), // ⬅ 필수 옵션
+  });
   res.on("close", () => transport.close());
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);

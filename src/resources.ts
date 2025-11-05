@@ -6,14 +6,15 @@ export function registerResources(server: McpServer, fmp: FmpClient) {
     "fmp-quote",
     new ResourceTemplate("fmp://quote/{symbol}", { list: undefined }),
     { title: "FMP Quote Resource", description: "Dynamic quote as text" },
-    async (uri, { symbol }) => {
-      const data = await fmp.get("/stable/quote", { symbol }, 5);
+    async (uri, { symbol }: { symbol: string | string[] }) => {
+      const sym = Array.isArray(symbol) ? symbol[0] : symbol; // ⬅ 문자열 보장
+      const data = await fmp.get("/stable/quote", { symbol: sym }, 5);
       const row = Array.isArray(data) ? data[0] : data;
       const lines = [
-        `Symbol: ${row?.symbol ?? symbol}`,
+        `Symbol: ${row?.symbol ?? sym}`,
         `Price: ${row?.price ?? row?.c ?? "?"}`,
         `Change: ${row?.change ?? row?.d ?? "?"} (${row?.changesPercentage ?? row?.dp ?? "?"}%)`,
-        `Updated: ${new Date().toISOString()}`
+        `Updated: ${new Date().toISOString()}`,
       ];
       return { contents: [{ uri: uri.href, text: lines.join("\n") }] };
     }
