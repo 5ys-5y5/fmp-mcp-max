@@ -26,6 +26,24 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// --- CORS & Preflight/HEAD hardening (for ChatGPT connector UI) -----------
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-api-key']
+}));
+
+// Ensure preflight succeeds universally
+app.options('*', cors());
+
+// Some clients send HEAD to verify the endpoint
+app.head('/mcp', gate, (_req, res) => {
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('cache-control', 'no-store');
+  res.status(200).end();
+});
+
+
 // --- helpers ---------------------------------------------------------------
 function gate(req, res, next) {
   if (!APP_API_KEY) return next();
