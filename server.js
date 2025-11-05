@@ -152,18 +152,27 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, name: 'fmp-mcp', version: '2.0.0' });
 });
 
-// List tools (what ChatGPT shows under \"액션\")
+// List tools (what ChatGPT shows under "액션")
+const MAX_TOOLS = Number(process.env.MAX_TOOLS || 800);
+
 app.get('/mcp', gate, (_req, res) => {
-  res.json({
-    name: 'FMP_MCP',
-    version: '2.0.0',
-    tools: Object.values(TOOLS).map(t => ({
+  const tools = Object.values(TOOLS)
+    .slice(0, MAX_TOOLS)
+    .map(t => ({
       name: t.name,
       description: t.description,
       input_schema: t.input_schema
-    }))
+    }));
+
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.json({
+    mcp: { version: '2024-11-01' }, // 메타 추가(권장)
+    name: 'FMP_MCP',
+    version: '2.0.0',
+    tools
   });
 });
+
 
 // Invoke tool — POST /mcp/:toolName
 app.post('/mcp/:name', gate, async (req, res) => {
