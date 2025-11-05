@@ -23,7 +23,6 @@ const FMP_HOST = 'https://financialmodelingprep.com';
 const FMP_DOCS = 'https://site.financialmodelingprep.com/developer/docs';
 
 const app = express();
-app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
 // CORS + Preflight hardening
@@ -47,17 +46,6 @@ app.head('/mcp', (_req, res) => {
   res.setHeader('cache-control', 'no-store');
   res.status(200).end();
 });
-
-// Ensure preflight succeeds universally
-app.options('*', cors());
-
-// Some clients send HEAD to verify the endpoint
-app.head('/mcp', gate, (_req, res) => {
-  res.setHeader('content-type', 'application/json; charset=utf-8');
-  res.setHeader('cache-control', 'no-store');
-  res.status(200).end();
-});
-
 
 // --- helpers ---------------------------------------------------------------
 function gate(req, res, next) {
