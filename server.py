@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Callable
 
 import httpx
 from dotenv import load_dotenv
+import sys
 from mcp.server.fastmcp import FastMCP
 
 # ASGI (Render/원격 배포)
@@ -511,12 +512,9 @@ def health(_request):
     return PlainTextResponse("OK")
 
 # 스트리머블 HTTP MCP를 /mcp 경로에 마운트
-app = Starlette(
-    routes=[
-        Route("/health", health),
-        Mount("/mcp", app=mcp.streamable_http_app()),
-    ]
-)
+app = mcp.streamable_http_app()
+app.add_route("/health", health)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 9) 실행(로컬/Render)
