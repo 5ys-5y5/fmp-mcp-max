@@ -1,190 +1,191 @@
+# FMP Universal MCP (User-key Only)
 
-# FMP Universal MCP Server — README
-
-이 리포지토리는 **Financial Modeling Prep(FMP) API**를 MCP(Model Context Protocol) 서버로 감싸서
-LLM/에이전트가 자연어 지시로 다양한 금융 데이터를 조회할 수 있도록 해 줍니다.
-
-`server.py`는 다음을 제공합니다:
-
-- **범용 호출 툴**: `fmp_call` — FMP의 거의 모든 엔드포인트를 1개의 툴로 호출
-- **카탈로그 기반 동적 툴**: 대표적인 Stable 엔드포인트들이 **각각 독립 MCP 툴**로 나타나, 액션 목록에서 바로 확인/실행
-- **요금제 힌트 표기**: 각 카탈로그 툴에는 `Plan hint`가 설명에 들어가 있어 어떤 플랜에서 접근 가능한지 가늠 가능
-- **접근성 점검 도구**: `list_fmp_endpoints(run_check=True)` / `test_endpoint_access(...)`로 **현재 API 키로 실제 호출 가능 여부**를 점검
-- **ASGI + Uvicorn 배포**: `/mcp` 경로로 스트리머블 HTTP MCP, `/health` 헬스체크 제공 → Render.com 등 PaaS에 손쉽게 배포
-
-> ⚠️ 주의: FMP의 실제 제공 범위/쿼터/가격은 시기에 따라 변동될 수 있습니다. `Plan hint`는 문서 기준의 **참고 정보**이며,
-> **반드시 `list_fmp_endpoints(run_check=True)`** 로 _현재 API 키_에서의 접근 가능 여부를 확인하세요.
+> **핵심 요약**
+>
+> - **환경변수/서버 키는 전혀 사용하지 않습니다.**
+> - **`?apiKey=<YOUR_FMP_KEY>` 또는 헤더 `X-FMP-Api-Key` 로 전달된 키만** 사용하여 FMP에 요청합니다.
+> - `PRODUCT_API_KEY` 기반 서버 인증은 **제거**되었습니다.
+> - MCP/Connector 시나리오에서 **`Mcp-Session-Id`** 로 세션 단위 키 저장/재사용이 가능합니다.
 
 ---
 
-## 폴더 구조
+## 1) 구성 개요
 
-```
-.
-├─ server.py          # MCP 서버(ASGI), 카탈로그/툴 정의
-├─ requirements.txt   # 의존성
-├─ render.yaml        # (선택) Render.com 배포 블루프린트
-├─ .env.example       # 환경변수 템플릿
-└─ .gitignore
-```
+- 서버 프레임워크: **Starlette** (MCP `FastMCP.streamable_http_app()` 사용)
+- 외부 연동: **Financial Modeling Prep (FMP)** — `https://financialmodelingprep.com`
+- HTTP 클라이언트: `httpx`
+- 파일: `server.py` (본 저장소의 단일 진입점)
+
+### 키 처리 정책
+
+- 서버/환경변수 `FMP_API_KEY` **미사용** (폴백/강제 검증 제거)
+- `PRODUCT_API_KEY`, `REQUIRE_MCP_AUTH`, `ALLOW_QUERY_API_KEY` **실질 폐기**
+- 모든 FMP 호출은 **사용자 제공 키**만 사용
+  - URL 쿼리: `?apiKey=<YOUR_FMP_KEY>`
+  - 헤더: `X-FMP-Api-Key: <YOUR_FMP_KEY>`
+  - 세션: `Mcp-Session-Id`(또는 `mcp_session_id` 쿼리)로 **세션 저장 후 재사용**
+
+> 초기 요청에서 `?apiKey=...`만 전달되면 해당 키가 **DEFAULT_FMP_KEY_FROM_URL** 로 임시 저장되어
+> 이후 세션 식별자가 없는 요청에도 일시적으로 활용될 수 있습니다.
 
 ---
 
-## 요구사항
-
-- Python 3.10+ (권장 3.11+)
-- FMP API Key (`FMP_API_KEY`)
-- 의존성: `mcp[cli]`, `httpx`, `python-dotenv`, `starlette`, `uvicorn`
-
-설치:
+## 2) 설치
 
 ```bash
-pip install -r requirements.txt
+# python 3.10+ 권장
+pip install uvicorn httpx python-dotenv starlette mcp
 ```
 
-환경변수 설정(택1):
-
-- `.env` 파일 (권장)
-  ```env
-  FMP_API_KEY=YOUR_FMP_API_KEY
-  ```
-- 또는 PowerShell(임시):  
-  ```powershell
-  $env:FMP_API_KEY = "YOUR_FMP_API_KEY"
-  ```
+> 일부 환경에서는 `pip install mcp` 패키지가 제공되지 않을 수 있습니다. 그런 경우
+> MCP 클라이언트/서버 툴킷을 별도로 설치하거나 제공된 `server.py`의 MCP 관련 라인을
+> 임시로 주석 처리하여 일반 HTTP 엔드포인트만 사용할 수 있습니다.
 
 ---
 
-## 실행 방법
-
-### 1) 로컬(HTTP 서버)
+## 3) 실행
 
 ```bash
-python server.py
-# 헬스체크
-curl http://localhost:8000/health  # "OK"
-# MCP 엔드포인트: http://localhost:8000/mcp
+uvicorn server:app --reload
+# 기본 주소: http://127.0.0.1:8000
 ```
 
-### 2) MCP Inspector로 테스트
+Render 등 PaaS에서는 `PORT` 환경변수가 자동 주입될 수 있으며, 본 코드는
+`PORT`가 없으면 **8000** 포트로 구동됩니다.
 
-옵션 A) `uv` 사용
+---
+
+## 4) HTTP 엔드포인트
+
+> 아래 엔드포인트들은 **로컬 테스트**용으로 추가되어 있습니다. (MCP 툴 호출을 감싸는 얇은 래퍼)
+
+### 4.1 회사 프로필
+```
+GET /fmp/profile/{symbol}
+```
+
+예시:
+```bash
+curl "http://127.0.0.1:8000/fmp/profile/AAPL?apiKey=YOUR_FMP_KEY"
+# 또는
+curl -H "X-FMP-Api-Key: YOUR_FMP_KEY" "http://127.0.0.1:8000/fmp/profile/AAPL"
+```
+
+### 4.2 실시간 시세
+```
+GET /fmp/quote/{symbol}
+```
+
+예시:
+```bash
+curl "http://127.0.0.1:8000/fmp/quote/AAPL?apiKey=YOUR_FMP_KEY"
+# 또는
+curl -H "X-FMP-Api-Key: YOUR_FMP_KEY" "http://127.0.0.1:8000/fmp/quote/AAPL"
+```
+
+### 4.3 임의 경로 프록시 (주의)
+```
+GET /fmp/call?path=/api/v3/profile/AAPL&apiKey=YOUR_FMP_KEY
+```
+
+> **보안 주의**: 운영환경에서는 `/fmp/call`의 허용 경로 화이트리스트/레이트리밋을 꼭 구성하세요.
+
+### 4.4 헬스체크
+```
+GET /health
+```
+- 키가 없는 경우: 외부 연동 테스트는 건너뛰고 단순 응답
+- 키가 있는 경우: 가벼운 FMP 엔드포인트를 실제로 호출하여 연결성 확인
+
+### 4.5 루트/웰노운
+- `GET /` : 인덱스 정보
+- `GET /.well-known/openid-configuration` : OAuth/OIDC 미지원 안내(의도적 404)
+- `GET /.well-known/oauth-authorization-server` : OAuth/OIDC 미지원 안내(의도적 404)
+
+---
+
+## 5) MCP 도구(툴)
+
+Starlette 애플리케이션은 `FastMCP.streamable_http_app()`로 구성되어 **/mcp** SSE 엔드포인트를 제공합니다.
+다음 MCP 툴들이 공개되어 있습니다.
+
+- **핵심**: `fmp_call(endpoint, service, params, ...)`
+  - 모든 FMP 호출을 포괄하는 범용 호출기
+  - 사용자 키가 없으면 아래와 같은 `_error` 구조로 응답
+- **카탈로그 기반 동적 툴**: `fmp_search_name`, `fmp_quote`, `fmp_income_statement` 등 다수
+- **유틸**:
+  - `ping()` : 세션/키 보유 여부 확인
+  - `set_fmp_api_key(api_key)` / `clear_fmp_api_key()` : 세션에 키 등록/해제
+  - `list_fmp_endpoints(run_check=True)` : 카탈로그 + 접근성 체크
+  - `test_endpoint_access(service, endpoint, params)` : 특정 엔드포인트 샘플 호출
+
+### `_error` 응답 포맷 (예)
+
+```json
+{
+  "_error": {
+    "code": "MISSING_API_KEY",
+    "needs_user_confirmation": false,
+    "suggest_web_search": true,
+    "message": "MCP URL에 ?apiKey=... 로 FMP 키를 전달해야 합니다...",
+    "explain_to_user": "MCP 서버 등록 시 URL 끝에 ?apiKey=<YOUR_FMP_KEY>를 포함해 주세요."
+  }
+}
+```
+
+업스트림 에러(401/402/403/429/5xx 등)는 `_error.code/status/plan_hint/suggested_action` 등으로
+분류되어 반환됩니다.
+
+---
+
+## 6) 세션과 키 저장 규칙
+
+- 요청에 **`Mcp-Session-Id`** 헤더(또는 쿼리 `mcp_session_id`)가 있으면 해당 값을 세션 ID로 사용합니다.
+- `X-FMP-Api-Key` 헤더나 `?apiKey` 파라미터가 포함되면 **해당 세션에 키가 저장**됩니다.
+- 이후 같은 세션 ID로 요청하면 **키를 생략**할 수 있습니다.
+
+예시 (PowerShell):
 ```powershell
-uv run mcp dev server.py
-# 브라우저에서 표시되는 Inspector UI 접속
+# 1) 최초 요청: 세션 + apiKey
+curl -H "Mcp-Session-Id: local-test-session" "http://127.0.0.1:8000/fmp/profile/AAPL?apiKey=YOUR_FMP_KEY"
+
+# 2) 이후 요청: 같은 세션, 키 생략
+curl -H "Mcp-Session-Id: local-test-session" "http://127.0.0.1:8000/fmp/quote/AAPL"
 ```
 
-옵션 B) 서버/인스펙터 분리
-```powershell
-# 터미널1: 서버 실행
-python server.py
+---
 
-# 터미널2: 인스펙터 실행
-npx -y @modelcontextprotocol/inspector
-# 좌측 Server connection → Transport: HTTP, URL: http://localhost:8000/mcp → Connect
-```
+## 7) 자주 하는 질문(FAQ) & 트러블슈팅
 
-> Windows에서 `uv` 가 인식되지 않으면 `C:\Users\<you>\.local\bin`을 사용자 PATH에 추가하거나
-> 세션 별칭 `Set-Alias uv "$env:USERPROFILE\.local\bin\uv.exe"`를 사용하세요.
+### Q1) `404 Not Found`가 떠요.
+- **원인1**: 서버가 구버전 코드입니다. `server.py`에 다음 라우트 3개가 **반드시 포함**되어야 합니다.
+  - `app.add_route("/fmp/profile/{symbol}", ...)`
+  - `app.add_route("/fmp/quote/{symbol}", ...)`
+  - `app.add_route("/fmp/call", ...)`
+- **원인2**: 오탈자/경로 오류. 예: `/fmp/quote/AAPL` 처럼 **심볼**을 path param으로 전달해야 합니다.
+
+### Q2) `_error: MISSING_API_KEY`가 떠요.
+- URL에 `?apiKey=...` 또는 헤더 `X-FMP-Api-Key: ...`를 포함했는지 확인하세요.
+- MCP 사용 중이면 `set_fmp_api_key()`로 세션에 등록할 수 있습니다.
+
+### Q3) 401/402/403/429/5xx 등 업스트림 에러가 떠요.
+- 응답의 `_error` 필드를 확인하세요. `plan_hint`, `suggested_action`에 대응 방법이 안내됩니다.
+
+### Q4) Render 배포 시 설정은?
+- **FMP_API_KEY/PRODUCT_API_KEY**는 필요하지 않습니다(사용하지 않음).
+- 필요 시 `CORS_ALLOW_ORIGINS`만 환경변수로 지정하세요.
+- 포트는 `PORT` 환경변수를 따르며, 없는 경우 8000을 사용합니다.
 
 ---
 
-## 제공 툴(요약)
+## 8) 보안 주의사항
 
-### A. 범용 호출기
-
-**`fmp_call(endpoint, service='stable'|'v3'|'v4'|'api'|'raw', params={}, symbol?, paginate?, page_param='page', start_page=0, max_pages=1, method='GET')`**
-
-- 임의의 엔드포인트를 직접 호출합니다.
-- 예시
-  - `fmp_call("quote", params={"symbol":"AAPL"})`
-  - `fmp_call("income-statement", params={"symbol":"TSLA","period":"annual","limit":2})`
-  - `fmp_call("key-metrics", params={"symbol":"AAPL","limit":5})`
-
-### B. 카탈로그 기반 동적 툴(액션 목록에 보임)
-
-- `fmp_search_name` — 회사 이름으로 티커 검색 *(Plan hint: Basic(EOD))*
-- `fmp_search` — 심볼/이름/ISIN/CIK/CUSIP 검색 *(Basic(EOD))*
-- `fmp_available_industries` — 사용 가능한 산업 목록 *(Basic(EOD))*
-- `fmp_quote` — 실시간 주가 *(Starter+)*
-- `fmp_historical_price_eod_full` — EOD 히스토리(전체) *(Basic(EOD))*
-- `fmp_income_statement` — 손익계산서 *(Starter+)*
-- `fmp_balance_sheet_statement` — 대차대조표 *(Starter+)*
-- `fmp_cash_flow_statement` — 현금흐름표 *(Starter+)*
-- `fmp_key_metrics` — 핵심 지표 *(Starter+)*
-- `fmp_ratios` — 재무 비율 *(Starter+)*
-- `fmp_profile_symbol` — 회사 프로필(심볼) *(Starter+)*
-- `fmp_profile_bulk` — 프로필 벌크 *(Starter+)*
-- `fmp_earnings_calendar` — 어닝 달력 *(Starter+)*
-- `fmp_dividends_calendar` — 배당 달력 *(Starter+)*
-- `fmp_ipo_calendar` — IPO 달력 *(Starter+)*
-- `fmp_stock_news` — 주식 뉴스 *(Starter+)*
-- `fmp_all_index_quotes` — 전체 지수 시세 *(Starter+)*
-- `fmp_full_index_quotes` — 지수 시세(상세) *(Starter+)*
-
-> **참고**: 실제 사용 가능 여부는 플랜/키마다 다릅니다. 아래 점검 도구로 확인하세요.
-
-### C. 점검 도구
-
-- `list_fmp_endpoints(run_check: bool = False)`  
-  - `run_check=True`로 호출 시, 각 엔드포인트를 **샘플 파라미터**로 실제 호출해 `{ ok: true/false, error }`를 반환합니다.
-  - 액션 목록/요금제 힌트를 **한눈에 정리**하는 용도로 사용하세요.
-- `test_endpoint_access(service: str, endpoint: str, params: dict = {})`  
-  - 임의 엔드포인트에 대해 **즉시 호출 가능 여부**를 확인하고, 샘플 응답 일부를 돌려줍니다.
-
-### D. 즐겨 쓰는 단축 툴
-
-- `search_name(query: str, limit: int = 10, exchange: str | None = None)`
-- `get_quote(symbol: str)`
-- `get_income_statement(symbol: str, period: str = "annual", limit: int = 1)`
+- 공개 배포 시 `/fmp/call`은 **화이트리스트/레이트리밋**을 반드시 적용하세요.
+- API Key는 로그에 남기지 마세요(리버스 프록시/모니터링 도구 포함).
+- **HTTPS**(TLS) 환경에서만 사용하세요.
 
 ---
 
-## 사용 예(Inspector에서)
+## 9) 라이선스
 
-1) **애플 실시간 주가**
-   - Tool: `fmp_quote`
-   - Params: `{"params":{"symbol":"AAPL"}}`
-
-2) **테슬라 손익계산서 2개(연간)**
-   - Tool: `fmp_income_statement`
-   - Params: `{"params":{"symbol":"TSLA","period":"annual","limit":2}}`
-
-3) **내 키로 접근 가능한 기능 목록**
-   - Tool: `list_fmp_endpoints`
-   - Params: `{"run_check": true}`
-
-4) **아무 엔드포인트 호출(범용)**
-   - Tool: `fmp_call`
-   - Params: `{"endpoint":"key-metrics","service":"stable","params":{"symbol":"AAPL","limit":5}}`
-
----
-
-## Render.com 배포(요약)
-
-**옵션 1) render.yaml (Blueprint)**  
-리포지토리를 Render에 연결하면 자동 감지됨.
-
-**옵션 2) Web Service 수동 설정**
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `uvicorn server:app --host 0.0.0.0 --port $PORT`
-- 환경변수: `FMP_API_KEY=<발급키>`
-- 헬스체크: `GET /health` (expect: `OK`)
-- MCP 엔드포인트: `https://<서비스도메인>.onrender.com/mcp`
-
----
-
-## 트러블슛
-
-- **401/403**: API 키 누락/오류 → `.env` 또는 환경변수 확인
-- **429/5xx**: 레이트 리미트/일시 오류 → 자동 재시도(지수 백오프) 내장, 호출 간격 늘려 재시도
-- **Windows에서 `uv`를 못 찾음**:  
-  `C:\Users\<you>\.local\bin`에 `uv.exe`가 있으면 사용자 PATH에 해당 폴더를 추가하고 **새 터미널**을 여세요.
-  임시로는 `& "$env:USERPROFILE\.local\bin\uv.exe" --version`로 직접 실행 가능
-
----
-
-## 라이선스 / 책임
-
-- 이 프로젝트는 예시 코드로 제공됩니다. 실제 운영/과금에 맞는 호출 빈도/데이터 범위는
-  사용자의 책임 하에 설정하세요. FMP 계정/과금은 각 사용자가 직접 관리해야 합니다.
+내부 사용 또는 프로젝트 정책에 따릅니다.
