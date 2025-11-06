@@ -26,19 +26,15 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-FMP_API_KEY = os.getenv("FMP_API_KEY")
-if not FMP_API_KEY:
-    raise RuntimeError("FMP_API_KEY가 비었습니다. .env 또는 Render 환경변수를 확인하세요.")
+# (변경) 서버/환경변수 FMP 키는 더 이상 사용하지 않습니다. 남겨두되 강제/폴백 제거.
+FMP_API_KEY = os.getenv("FMP_API_KEY")  # not used as fallback anymore
 
-# 인증은 선택적으로만 강제:
-# - REQUIRE_MCP_AUTH=1 인 경우에만 /mcp 보호
-REQUIRE_MCP_AUTH = os.getenv("REQUIRE_MCP_AUTH", "0") == "1"
-PRODUCT_API_KEY = os.getenv("PRODUCT_API_KEY")  # 없을 수도 있음
-if REQUIRE_MCP_AUTH and not PRODUCT_API_KEY:
-    raise RuntimeError("REQUIRE_MCP_AUTH=1인데 PRODUCT_API_KEY가 없습니다.")
+# (변경) PRODUCT_API_KEY 개념은 제거합니다. 아래 두 변수는 더 이상 인증 강제에 쓰지 않습니다.
+REQUIRE_MCP_AUTH = False  # os.getenv("REQUIRE_MCP_AUTH", "0") == "1"  # deprecated: not enforced
+PRODUCT_API_KEY = None    # os.getenv("PRODUCT_API_KEY")  # deprecated: not used
 
-# 쿼리스트링으로 /mcp 인증 허용 여부(로그 유출 위험). 기본: 금지(0).
-ALLOW_QUERY_API_KEY = os.getenv("ALLOW_QUERY_API_KEY", "0") == "1"
+# 쿼리스트링으로 /mcp 인증 허용 여부(로그 유출 위험). (deprecated with PRODUCT_API_KEY removal)
+ALLOW_QUERY_API_KEY = False  # os.getenv("ALLOW_QUERY_API_KEY", "0") == "1"  # deprecated
 
 # CORS 허용 오리진(쉼표 구분). 기본: ChatGPT 도메인들.
 CORS_ALLOW_ORIGINS = os.getenv(
@@ -57,6 +53,8 @@ mcp = FastMCP("FMP Universal")
 # 세션별 사용자 FMP 키 저장 (Connectors/Deep Research에서 세션 단위 사용)
 CURRENT_SESSION_ID: ContextVar[Optional[str]] = ContextVar("CURRENT_SESSION_ID", default=None)
 SESSION_FMP_KEYS: Dict[str, str] = {}
+# (추가) URL로 전달된 사용자 키를 세션 없이도 임시 사용할 수 있도록 기본 슬롯을 둡니다.
+DEFAULT_FMP_KEY_FROM_URL: Optional[str] = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 요금제/엔드포인트 카탈로그
@@ -349,9 +347,9 @@ def _request_json(
     max_retries: int = 3,
 ) -> Any:
     qp = dict(params or {})
-    # 사용자 키가 이미 세팅되어 있을 수 있으므로 덮어쓰지 않음
-    if "apikey" not in qp:
-        qp["apikey"] = FMP_API_KEY  # 서버 기본키 (헬스체크/백업용)
+    # (변경) 서버 기본키 폴백 제거: apikey는 반드시 사전에 사용자 키로 설정되어 있어야 합니다.
+    if "apikey" not in qp or not qp["apikey"]:
+        raise RuntimeError("FMP apikey is missing. Provide ?apiKey=... (saved to session) or set via set_fmp_api_key().")
 
     attempt = 0
     while True:
@@ -415,6 +413,9 @@ def _resolve_user_fmp_key(qp: Dict[str, Any]) -> Optional[str]:
     sid = CURRENT_SESSION_ID.get()
     if sid and sid in SESSION_FMP_KEYS:
         return SESSION_FMP_KEYS[sid]
+    # 3) (보강) URL로 전달된 기본키가 있다면 사용
+    if DEFAULT_FMP_KEY_FROM_URL:
+        return DEFAULT_FMP_KEY_FROM_URL
     return None
 
 def _plan_hint_for(service: str, endpoint: str) -> Optional[str]:
@@ -579,7 +580,7 @@ def _register_catalog_tools():
 _register_catalog_tools()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) 액세스 점검/목록 도구 (서버 기본키로 단순 체크)
+# 6) 액세스 점검/목록 도구 (사용자 키 필요)
 # ──────────────────────────────────────────────────────────────────────────────
 def _check_access(item: Dict[str, Any]) -> Dict[str, Any]:
     service = item["service"]
@@ -591,7 +592,16 @@ def _check_access(item: Dict[str, Any]) -> Dict[str, Any]:
     if "params" in test and isinstance(test["params"], dict):
         params.update(test["params"])
 
-    # 서버 기본키로만 헬스 체크(사용자 키 아님)
+    # (변경) 사용자 키가 없으면 헬스 체크 불가
+    user_key = _resolve_user_fmp_key({})
+    if not user_key:
+        return {
+            "ok": False,
+            "error": "No user FMP API key. Register MCP with ?apiKey=<YOUR_FMP_KEY> or call set_fmp_api_key()."
+        }
+    params = dict(params)
+    params["apikey"] = user_key
+
     try:
         _ = _request_json("GET", url_or_path, params=params, max_retries=1)
         return {"ok": True, "error": None}
@@ -622,7 +632,14 @@ def list_fmp_endpoints(category: Optional[str] = None, run_check: bool = False) 
 def test_endpoint_access(service: str, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     try:
         url_or_path = _norm_path(service, endpoint)
-        data = _request_json("GET", url_or_path, params=params or {}, max_retries=1)
+        p = dict(params or {})
+        # (변경) 사용자 키 필수
+        user_key = _resolve_user_fmp_key({})
+        if not user_key:
+            return {"ok": False, "error": "No user FMP API key. Pass ?apiKey=... or set_fmp_api_key()."}
+        p["apikey"] = user_key
+
+        data = _request_json("GET", url_or_path, params=p, max_retries=1)
         small = data
         try:
             if isinstance(data, list) and len(data) > 3:
@@ -772,7 +789,7 @@ def help_doc() -> str:
     return (
         "FMP Universal MCP 도움말\n"
         "1) 사용자 키 전달(기본): MCP URL에 ?apiKey=<YOUR_FMP_KEY>\n"
-        "   (선택) 세션 중 변경: set_fmp_api_key(api_key) / clear_fmp_api_key()\n""1) 사용자 키 등록: set_fmp_api_key(api_key) / clear_fmp_api_key()\n"
+        "   (선택) 세션 중 변경: set_fmp_api_key(api_key) / clear_fmp_api_key()\n"
         "2) 범용 호출: fmp_call(endpoint, service='stable'|'v3'|'v4'|'api'|'raw', params={}, symbol?, ...)\n"
         "3) 카탈로그 툴: fmp_* (엔드포인트별 개별 액션, plan_hint 포함)\n"
         "4) 점검: list_fmp_endpoints(run_check=True) / test_endpoint_access()\n"
@@ -794,14 +811,16 @@ def index(_request: Request):
             "well_known_oidc": "/.well-known/openid-configuration (not supported)",
             "well_known_oauth": "/.well-known/oauth-authorization-server (not supported)",
         },
+        # (변경) PRODUCT_API_KEY 기반 서버 인증 제거 안내
         "auth": {
-            "server_protection": "enabled" if REQUIRE_MCP_AUTH else "disabled",
-            "header_usage": "Use Authorization: Bearer <PRODUCT_API_KEY> or X-API-Key",
-            "query_param_auth_allowed": ALLOW_QUERY_API_KEY,
+            "server_protection": "removed",
+            "header_usage": "N/A (no PRODUCT_API_KEY)",
+            "query_param_auth_allowed": False,
         },
         "fmp_key_flow": {
             "set_tool": "set_fmp_api_key(api_key)",
             "http_header_hint": "X-FMP-Api-Key + Mcp-Session-Id",
+            "url_param_hint": "MCP 등록 시 ?apiKey=<YOUR_FMP_KEY>",
         },
         "note": "이 페이지는 루트 404 혼동을 줄이기 위한 인덱스입니다.",
     }
@@ -810,13 +829,13 @@ def index(_request: Request):
 # OIDC/OAuth 자동탐색에 대한 명시적 안내(404 대신 의미있는 설명 제공)
 def well_known_oidc(_request: Request):
     return JSONResponse(
-        {"error": "oauth_not_supported", "message": "이 서버는 OAuth/OIDC 인증을 제공하지 않습니다. MCP 연결시 인증 방식을 API Key 또는 None으로 설정하세요."},
+        {"error": "oauth_not_supported", "message": "이 서버는 OAuth/OIDC 인증을 제공하지 않습니다. MCP 연결시 인증을 API Key(사용자 제공)로 설정하세요."},
         status_code=404,
     )
 
 def well_known_oauth(_request: Request):
     return JSONResponse(
-        {"error": "oauth_not_supported", "message": "이 서버는 OAuth/OIDC 인증을 제공하지 않습니다. Authorization: Bearer 또는 X-API-Key 헤더를 사용하세요."},
+        {"error": "oauth_not_supported", "message": "이 서버는 OAuth/OIDC 인증을 제공하지 않습니다. Authorization 헤더 기반 서버 키는 사용하지 않습니다."},
         status_code=404,
     )
 
@@ -830,6 +849,46 @@ app.add_route("/", index, methods=["GET"])
 app.add_route("/health", health, methods=["GET"])
 app.add_route("/.well-known/openid-configuration", well_known_oidc, methods=["GET"])
 app.add_route("/.well-known/oauth-authorization-server", well_known_oauth, methods=["GET"])
+
+# (추가) 로컬 URL로 바로 테스트할 수 있는 HTTP 엔드포인트들
+async def http_fmp_profile(request: Request):
+    symbol = request.path_params.get("symbol", "").strip().upper()
+    qp: Dict[str, Any] = {"symbol": symbol}
+    # URL 또는 헤더에서 사용자 키 수집(있다면 params에 'apiKey'로 전달)
+    api_key = request.query_params.get("apiKey") or request.headers.get("X-FMP-Api-Key")
+    if api_key:
+        qp["apiKey"] = api_key
+    data = fmp_call(endpoint="profile", service="stable", params=qp, method="GET")
+    return JSONResponse(data)
+
+async def http_fmp_quote(request: Request):
+    symbol = request.path_params.get("symbol", "").strip().upper()
+    qp: Dict[str, Any] = {"symbol": symbol}
+    api_key = request.query_params.get("apiKey") or request.headers.get("X-FMP-Api-Key")
+    if api_key:
+        qp["apiKey"] = api_key
+    data = fmp_call(endpoint="quote", service="stable", params=qp, method="GET")
+    return JSONResponse(data)
+
+async def http_fmp_call(request: Request):
+    # 신뢰 가능한 클라이언트 전용 간단 프록시: /fmp/call?path=/api/v3/profile/AAPL&apiKey=...
+    path = request.query_params.get("path")
+    if not path:
+        return JSONResponse({"error": "path query parameter is required"}, status_code=400)
+    qp: Dict[str, Any] = {}
+    api_key = request.query_params.get("apiKey") or request.headers.get("X-FMP-Api-Key")
+    if api_key:
+        qp["apiKey"] = api_key
+    # 다른 쿼리들도 그대로 전달(단, path/apiKey는 제외)
+    for k, v in request.query_params.multi_items():
+        if k not in {"path", "apiKey"}:
+            qp[k] = v
+    data = fmp_call(endpoint=path, service="raw", params=qp, method="GET")
+    return JSONResponse(data)
+
+app.add_route("/fmp/profile/{symbol}", http_fmp_profile, methods=["GET"])
+app.add_route("/fmp/quote/{symbol}",   http_fmp_quote,   methods=["GET"])
+app.add_route("/fmp/call",             http_fmp_call,    methods=["GET"])
 
 # 프리플라이트 전용(일부 프록시 환경에서 필요)
 def options_ok(_request: Request):
@@ -847,25 +906,25 @@ app.add_middleware(
     max_age=86400,
 )
 
-# 세션 바인딩 (Mcp-Session-Id → ContextVar) + X-FMP-Api-Key 자동 등록
+# 세션 바인딩 (Mcp-Session-Id → ContextVar) + X-FMP-Api-Key / ?apiKey 자동 등록
 class SessionBinderMiddleware(BaseHTTPMiddleware):
     """
     각 요청의 Mcp-Session-Id를 컨텍스트 변수에 바인딩하고,
     X-FMP-Api-Key(또는 apiKey, fmp_apikey, apikey 쿼리)가 있으면 해당 세션에 사용자 FMP 키를 자동 저장.
     """
     async def dispatch(self, request: Request, call_next):
+        # 항상 먼저 사용자 키를 파악(세션ID 유무와 무관)
+        user_fmp_key = (
+            request.headers.get("X-FMP-Api-Key")
+            or request.query_params.get("apiKey")
+            or request.query_params.get("fmp_apikey")
+            or request.query_params.get("apikey")
+        )
+
         sid = request.headers.get("Mcp-Session-Id") or request.query_params.get("mcp_session_id")
         token = None
         if sid:
             token = CURRENT_SESSION_ID.set(sid)
-
-            # 사용자 FMP 키 추출(헤더/쿼리 모두 허용): X-FMP-Api-Key → apiKey → fmp_apikey → apikey
-            user_fmp_key = (
-                request.headers.get("X-FMP-Api-Key")
-                or request.query_params.get("apiKey")
-                or request.query_params.get("fmp_apikey")
-                or request.query_params.get("apikey")
-            )
             if user_fmp_key:
                 SESSION_FMP_KEYS[sid] = user_fmp_key.strip()
 
@@ -874,8 +933,13 @@ class SessionBinderMiddleware(BaseHTTPMiddleware):
 
         # 초기 SSE 등 응답 단계에서 세션 ID가 생기는 경우를 보강: 응답 헤더의 세션 ID로도 키 매핑
         resp_sid = resp.headers.get("Mcp-Session-Id")
-        if resp_sid and 'user_fmp_key' in locals() and user_fmp_key:
+        if resp_sid and user_fmp_key:
             SESSION_FMP_KEYS[resp_sid] = user_fmp_key.strip()
+
+        # 세션 식별이 전혀 없었던 경우에도 이후 호출에서 쓰일 수 있도록 전역 기본키로 보관
+        if user_fmp_key:
+            global DEFAULT_FMP_KEY_FROM_URL
+            DEFAULT_FMP_KEY_FROM_URL = user_fmp_key.strip()
 
         if token is not None:
             CURRENT_SESSION_ID.reset(token)
@@ -924,69 +988,21 @@ class SSEAcceptAndPathNormalizeMiddleware:
 
 app.add_middleware(SSEAcceptAndPathNormalizeMiddleware)  # type: ignore
 
-# 인증 미들웨어(선택 적용)
+# 인증 미들웨어(선택 적용) — (변경) PRODUCT_API_KEY 제거로 인해 로직은 무력화되지만 원문 구조는 유지합니다.
 class MCPApiKeyAuthMiddleware(BaseHTTPMiddleware):
     """
-    /mcp 요청에 대해 서버 전용 API 키를 '선택적으로' 요구하는 미들웨어.
-    - REQUIRE_MCP_AUTH=1 인 경우에만 강제
-    - 허용: /, /health, /.well-known/* (무인증)
-    - 허용: GET /mcp (SSE) — 초기 연결 호환을 위해 항상 허용
-    - 키 전달 방법:
-        1) Authorization: Bearer <key>
-        2) X-API-Key: <key>
-        3) (편의) ?api_key=<key> (ALLOW_QUERY_API_KEY=1 인 경우에만 허용)
+    (deprecated) /mcp 요청에 대해 서버 전용 API 키를 '선택적으로' 요구하는 미들웨어.
+    현재는 사용하지 않습니다.
     """
     def __init__(self, app: ASGIApp, api_key: Optional[str]):
         super().__init__(app)
         self.api_key = api_key
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path.rstrip("/")
-        method = request.method.upper()
-
-        # 항상 허용되는 경로
-        if path in {"/", "/health"} or path.startswith("/.well-known"):
-            return await call_next(request)
-
-        # 미강제 모드면 통과
-        if not REQUIRE_MCP_AUTH:
-            return await call_next(request)
-
-        # GET /mcp(SSE)는 무조건 허용하여 초기 연결 실패를 방지
-        if path == "/mcp" and method == "GET":
-            return await call_next(request)
-
-        # 나머지 /mcp* 는 인증
-        if path.startswith("/mcp"):
-            # 헤더 우선
-            key = request.headers.get("x-api-key")
-            if not key:
-                auth = request.headers.get("authorization", "")
-                if auth.lower().startswith("bearer "):
-                    key = auth.split(" ", 1)[1]
-
-            # 쿼리스트링은 옵션
-            if not key:
-                if ALLOW_QUERY_API_KEY:
-                    key = request.query_params.get("api_key")
-                else:
-                    # 쿼리스트링으로 키 전달 시도 → 거부 및 가이드
-                    if "api_key" in request.query_params:
-                        return JSONResponse(
-                            {"error": "Unauthorized", "message": "쿼리스트링 api_key는 비활성화되어 있습니다. Authorization: Bearer 또는 X-API-Key 헤더를 사용하세요."},
-                            status_code=401,
-                            headers={"WWW-Authenticate": 'Bearer realm="mcp", error="invalid_token"'},
-                        )
-
-            if not key or not self.api_key or not hmac.compare_digest(key, self.api_key):
-                return JSONResponse(
-                    {"error": "Unauthorized", "message": "유효한 PRODUCT_API_KEY가 필요합니다. Authorization: Bearer 또는 X-API-Key 헤더로 전달하세요."},
-                    status_code=401,
-                    headers={"WWW-Authenticate": 'Bearer realm="mcp", error="invalid_token"'},
-                )
-
+        # 원문 구조 보존: REQUIRE_MCP_AUTH가 False이므로 그대로 통과
         return await call_next(request)
 
+# 원문 라인 보존(무해함): 현재 PRODUCT_API_KEY=None, REQUIRE_MCP_AUTH=False라서 실질적으로 영향 없음
 app.add_middleware(MCPApiKeyAuthMiddleware, api_key=PRODUCT_API_KEY)
 
 # ──────────────────────────────────────────────────────────────────────────────
