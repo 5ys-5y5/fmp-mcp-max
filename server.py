@@ -13,6 +13,8 @@ from mcp.server.fastmcp import FastMCP
 
 import hmac
 
+import json
+
 # ASGI / Starlette
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -478,6 +480,67 @@ def get_income_statement(symbol: str, period: str = "annual", limit: int = 1) ->
         service="stable",
         params={"symbol": symbol, "period": period, "limit": limit},
     )
+
+# --- add near other tools (e.g., after #7 단축 툴) ---
+
+@mcp.tool()
+def search(query: str, limit: int = 5) -> str:
+    """
+    Deep Research / Connectors 규격: results 배열을 담은 JSON 문자열을 단일 text content로 반환
+    """
+    # FMP 검색으로 예시 구현
+    # stable/search-name 또는 stable/search 중 하나 사용
+    data = fmp_call(endpoint="search-name", service="stable",
+                    params={"query": query, "limit": limit})
+
+    results = []
+    for row in (data or []):
+        sym = row.get("symbol") or row.get("symbolName") or row.get("cik") or ""
+        name = row.get("name") or row.get("companyName") or sym or "Unknown"
+        if not sym:
+            continue
+        results.append({
+            "id": sym,                               # fetch에서 사용할 고유 ID
+            "title": f"{name} ({sym})",
+            "url": f"https://financialmodelingprep.com/profile/{sym}"
+        })
+
+    payload = {"results": results}
+    return json.dumps(payload, ensure_ascii=False)
+
+@mcp.tool()
+def fetch(id: str) -> str:
+    """
+    Deep Research / Connectors 규격: 단일 문서 객체(JSON 문자열) 반환
+    - id: search 결과의 id (여기서는 티커 심볼)
+    """
+    sym = id.strip().upper()
+
+    # 프로필/시세 일부를 모아 '문서의 본문 text' 구성
+    profile = fmp_call(endpoint=f"profile/{sym}", service="v3", params={}, method="GET")
+    quote   = fmp_call(endpoint="quote", service="stable", params={"symbol": sym}, method="GET")
+
+    name = (profile[0].get("companyName") if isinstance(profile, list) and profile else None) or sym
+    desc = (profile[0].get("description") if isinstance(profile, list) and profile else None) or ""
+    price = (quote[0].get("price") if isinstance(quote, list) and quote else None)
+
+    # 사람 읽기 좋은 텍스트 본문 작성
+    text_lines = [
+        f"Symbol: {sym}",
+        f"Name: {name}",
+        f"Price: {price}" if price is not None else "Price: N/A",
+        "",
+        desc or "No description.",
+    ]
+    doc = {
+        "id": sym,
+        "title": f"{name} ({sym})",
+        "text": "\n".join(text_lines),
+        "url": f"https://financialmodelingprep.com/profile/{sym}",
+        "metadata": {"source": "FMP", "fetched_at": __import__('datetime').datetime.utcnow().isoformat() + "Z"},
+    }
+    return json.dumps(doc, ensure_ascii=False)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 8) 리소스 & 헬스체크
