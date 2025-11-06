@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 import sys
 from mcp.server.fastmcp import FastMCP
 
+import hmac
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
 # ASGI (Render/원격 배포)
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -23,6 +29,10 @@ load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 if not FMP_API_KEY:
     raise RuntimeError("FMP_API_KEY가 비었습니다. .env 또는 Render 환경변수를 확인하세요.")
+
+PRODUCT_API_KEY = os.getenv("PRODUCT_API_KEY")
+if not PRODUCT_API_KEY:
+    raise RuntimeError("PRODUCT_API_KEY가 비었습니다. .env 또는 Render 환경변수를 확인하세요.")
 
 BASE_URL = "https://financialmodelingprep.com"
 client = httpx.Client(base_url=BASE_URL, timeout=20.0)
@@ -514,6 +524,44 @@ def health(_request):
 # 스트리머블 HTTP MCP를 /mcp 경로에 마운트
 app = mcp.streamable_http_app()
 app.add_route("/health", health)
+
+class MCPApiKeyAuthMiddleware(BaseHTTPMiddleware):
+    """
+    /mcp 요청에 대해 서버 전용 API 키를 요구하는 미들웨어.
+    - 허용: /health (무인증)
+    - 보호: /mcp 하위 경로 전부
+    - 키 전달 방법:
+        1) 헤더: X-API-Key: <key>
+        2) 헤더: Authorization: Bearer <key>
+        3) 쿼리: ?api_key=<key>   (권장하지 않지만 편의상 허용)
+    """
+    def __init__(self, app, api_key: str):
+        super().__init__(app)
+        self.api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path.rstrip("/")
+
+        # 1) 헬스체크는 항상 통과
+        if path == "/health":
+            return await call_next(request)
+
+        # 2) /mcp 보호
+        if path.startswith("/mcp"):
+            key = request.headers.get("x-api-key")
+            if not key:
+                auth = request.headers.get("authorization", "")
+                if auth.lower().startswith("bearer "):
+                    key = auth.split(" ", 1)[1]
+            if not key:
+                key = request.query_params.get("api_key")
+
+            if not key or not hmac.compare_digest(key, self.api_key):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        return await call_next(request)
+
+app.add_middleware(MCPApiKeyAuthMiddleware, api_key=PRODUCT_API_KEY)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
