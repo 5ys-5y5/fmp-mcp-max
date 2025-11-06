@@ -90,7 +90,7 @@ FMP_CATALOG: List[Dict[str, Any]] = [
     {
         "tool_name": "fmp_search",
         "service": "stable",
-        "endpoint": "search",
+        "endpoint": "search-symbol",
         "description": "심볼/이름/ISIN/CIK/CUSIP 검색",
         "plan_hint": "Basic(EOD)",
         "default_params": {},
@@ -117,14 +117,33 @@ FMP_CATALOG: List[Dict[str, Any]] = [
         "test": {"params": {"symbol": "AAPL"}},
     },
     {
-        "tool_name": "fmp_historical_price_eod_full",
+        "tool_name": "fmp_quote_short",
         "service": "stable",
-        "endpoint": "historical-price-eod-full",
+        "endpoint": "quote-short",
+        "description": "간략 시세",
+        "plan_hint": "Basic(EOD)",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL"}},
+    },
+    {
+        "tool_name": "fmp_historical_price_full",
+        "service": "stable",
+        "endpoint": "historical-price-eod/full",
         "description": "EOD 히스토리(OHLCV) 전체",
         "plan_hint": "Basic(EOD)",
         "default_params": {},
         "test": {"params": {"symbol": "AAPL", "from": "2023-01-01", "to": "2023-02-01"}},
     },
+    {
+        "tool_name": "fmp_historical_price_eod_light",  # 권장 추가
+        "service": "stable",
+        "endpoint": "historical-price-eod/light",
+        "description": "EOD 히스토리(경량)",
+        "plan_hint": "Basic(EOD)",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL", "from": "2024-01-01", "to": "2024-02-01"}},
+    },
+
 
     # ── Fundamentals
     {
@@ -155,6 +174,33 @@ FMP_CATALOG: List[Dict[str, Any]] = [
         "test": {"params": {"symbol": "AAPL", "limit": 1}},
     },
     {
+        "tool_name": "fmp_financial_statement_full_as_reported",
+        "service": "stable",
+        "endpoint": "financial-statement-full-as-reported",
+        "description": "As reported: 전체 재무제표",
+        "plan_hint": "Starter+",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL", "period": "annual", "limit": 1}},
+    },
+    {
+        "tool_name": "fmp_cash_flow_statement_as_reported",
+        "service": "stable",
+        "endpoint": "cash-flow-statement-as-reported",
+        "description": "As reported: 현금흐름표",
+        "plan_hint": "Starter+",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL", "period": "annual", "limit": 1}},
+    },
+    {
+        "tool_name": "fmp_balance_sheet_statement_as_reported",
+        "service": "stable",
+        "endpoint": "balance-sheet-statement-as-reported",
+        "description": "As reported: 대차대조표",
+        "plan_hint": "Starter+",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL", "period": "annual", "limit": 1}},
+    },
+    {
         "tool_name": "fmp_key_metrics",
         "service": "stable",
         "endpoint": "key-metrics",
@@ -177,7 +223,7 @@ FMP_CATALOG: List[Dict[str, Any]] = [
     {
         "tool_name": "fmp_profile_symbol",
         "service": "stable",
-        "endpoint": "profile-symbol",
+        "endpoint": "profile",
         "description": "회사 프로필(심볼 기준)",
         "plan_hint": "Starter+",
         "default_params": {},
@@ -191,6 +237,24 @@ FMP_CATALOG: List[Dict[str, Any]] = [
         "plan_hint": "Starter+",
         "default_params": {},
         "test": {"params": {"part": 0}},
+    },
+    {
+        "tool_name": "fmp_profile_cik",
+        "service": "stable",
+        "endpoint": "profile-cik",
+        "description": "회사 프로필(CIK 기반)",
+        "plan_hint": "Starter+",
+        "default_params": {},
+        "test": {"params": {"cik": "0000320193"}},
+    },
+    {
+        "tool_name": "fmp_sec_profile",
+        "service": "stable",
+        "endpoint": "sec-profile",
+        "description": "SEC 기반 회사 상세 프로필",
+        "plan_hint": "Starter+",
+        "default_params": {},
+        "test": {"params": {"symbol": "AAPL"}},
     },
 
     # ── Calendars
@@ -502,7 +566,7 @@ def search(query: str, limit: int = 5) -> str:
         results.append({
             "id": sym,                               # fetch에서 사용할 고유 ID
             "title": f"{name} ({sym})",
-            "url": f"https://financialmodelingprep.com/profile/{sym}"
+            "url": f"https://financialmodelingprep.com/stable/profile?symbol={sym}"
         })
 
     payload = {"results": results}
@@ -517,7 +581,7 @@ def fetch(id: str) -> str:
     sym = id.strip().upper()
 
     # 프로필/시세 일부를 모아 '문서의 본문 text' 구성
-    profile = fmp_call(endpoint=f"profile/{sym}", service="v3", params={}, method="GET")
+    profile = fmp_call(endpoint="profile", service="stable", params={"symbol": sym}, method="GET")
     quote   = fmp_call(endpoint="quote", service="stable", params={"symbol": sym}, method="GET")
 
     name = (profile[0].get("companyName") if isinstance(profile, list) and profile else None) or sym
@@ -536,7 +600,7 @@ def fetch(id: str) -> str:
         "id": sym,
         "title": f"{name} ({sym})",
         "text": "\n".join(text_lines),
-        "url": f"https://financialmodelingprep.com/profile/{sym}",
+        "url": f"https://financialmodelingprep.com/stable/profile?symbol={sym}",
         "metadata": {"source": "FMP", "fetched_at": __import__('datetime').datetime.utcnow().isoformat() + "Z"},
     }
     return json.dumps(doc, ensure_ascii=False)
