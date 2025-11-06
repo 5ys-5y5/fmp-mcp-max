@@ -12,27 +12,37 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 import hmac
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 
-
-# ASGI (Render/원격 배포)
+# ASGI / Starlette
 from starlette.applications import Starlette
-from starlette.routing import Mount, Route
-from starlette.responses import PlainTextResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0) 환경설정 / HTTP 클라이언트
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
+
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 if not FMP_API_KEY:
     raise RuntimeError("FMP_API_KEY가 비었습니다. .env 또는 Render 환경변수를 확인하세요.")
 
-PRODUCT_API_KEY = os.getenv("PRODUCT_API_KEY")
-if not PRODUCT_API_KEY:
-    raise RuntimeError("PRODUCT_API_KEY가 비었습니다. .env 또는 Render 환경변수를 확인하세요.")
+# 인증은 선택적으로만 강제합니다.
+# - REQUIRE_MCP_AUTH=1 인 경우에만 /mcp 보호
+# - 그 외에는 공개(개발/연결 편의를 위해)
+REQUIRE_MCP_AUTH = os.getenv("REQUIRE_MCP_AUTH", "0") == "1"
+PRODUCT_API_KEY = os.getenv("PRODUCT_API_KEY")  # 없을 수도 있음
+if REQUIRE_MCP_AUTH and not PRODUCT_API_KEY:
+    raise RuntimeError("REQUIRE_MCP_AUTH=1인데 PRODUCT_API_KEY가 없습니다.")
+
+# CORS 허용 오리진(쉼표 구분). 기본: ChatGPT 도메인들.
+CORS_ALLOW_ORIGINS = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "https://chatgpt.com,https://chat.openai.com",
+).split(",")
 
 BASE_URL = "https://financialmodelingprep.com"
 client = httpx.Client(base_url=BASE_URL, timeout=20.0)
@@ -44,21 +54,11 @@ mcp = FastMCP("FMP Universal")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 요금제/엔드포인트 카탈로그
-#    - plan_hint는 문서/가격 비교표 기준의 "힌트"입니다.
-#    - 실제 접근 가능 여부는 list_fmp_endpoints(run_check=True) 또는 test_endpoint_access로 확인.
-#
-# 참고(요금/개요):
-# - Pricing 비교(개인용 Basic/Starter/Premium/Ultimate): https://site.financialmodelingprep.com/developer/docs/pricing
-#   · Basic: End of Day 위주, 일일 호출 한도 낮음
-#   · Starter+: Real-time(실시간) 제공, 분당 호출량 넉넉
-#   · Premium/Ultimate: 장기 히스토리(30+년), 더 많은 데이터/속도
-# - Stable 엔드포인트 문서 허브: https://site.financialmodelingprep.com/developer/docs
 # ──────────────────────────────────────────────────────────────────────────────
 FMP_PLANS: Dict[str, Dict[str, Any]] = {
     "Basic(EOD)": {
         "timeframe": "End of Day",
         "notes": "기본 무상(또는 저가) 플랜. EOD 데이터 중심, 호출/히스토리 제한."
-        # </* noqa: E501 */>
     },
     "Starter+": {
         "timeframe": "Real-time",
@@ -74,14 +74,6 @@ FMP_PLANS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# 카테고리별 대표 stable 엔드포인트들 (필요 시 자유롭게 추가/수정)
-# - tool_name: MCP 툴 이름(중복 불가)
-# - service: "stable" | "v3" | "v4" | "api"(=v3) | "raw"
-# - endpoint: FMP 경로 (예: "quote", "income-statement")
-# - description: MCP에 노출될 설명(요금제 힌트 포함)
-# - plan_hint: "Basic(EOD)" | "Starter+" | "Premium+" | "Ultimate+"
-# - default_params: 기본 쿼리 파라미터 (필요 시)
-# - test: 접근 점검에 사용할 샘플(심볼/파라미터)
 FMP_CATALOG: List[Dict[str, Any]] = [
     # ── Directory & Search
     {
@@ -132,7 +124,7 @@ FMP_CATALOG: List[Dict[str, Any]] = [
         "test": {"params": {"symbol": "AAPL", "from": "2023-01-01", "to": "2023-02-01"}},
     },
 
-    # ── Fundamentals (Statements / Ratios / Metrics)
+    # ── Fundamentals
     {
         "tool_name": "fmp_income_statement",
         "service": "stable",
@@ -199,7 +191,7 @@ FMP_CATALOG: List[Dict[str, Any]] = [
         "test": {"params": {"part": 0}},
     },
 
-    # ── Calendars (Earnings / Dividends / IPO / Splits)
+    # ── Calendars
     {
         "tool_name": "fmp_earnings_calendar",
         "service": "stable",
@@ -297,7 +289,6 @@ def _request_json(
             return resp.json()
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
-            # 429/5xx 지수 백오프
             if status in (429, 500, 502, 503, 504) and attempt < max_retries:
                 time.sleep((2 ** attempt) + random.random())
                 attempt += 1
@@ -367,7 +358,6 @@ def fmp_call(
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5) 카탈로그 기반 동적 툴 등록
-#    - 각 엔드포인트가 MCP 액션 목록에 개별 툴로 노출됩니다.
 # ──────────────────────────────────────────────────────────────────────────────
 def _register_catalog_tools():
     for item in FMP_CATALOG:
@@ -379,7 +369,6 @@ def _register_catalog_tools():
         default_params = dict(item.get("default_params", {}))
 
         def _factory(_service=service, _endpoint=endpoint, _defaults=default_params, _desc=description, _plan=plan_hint):
-            # 공통 시그니처(필요 파라미터는 params로 전달)
             def tool(
                 params: Optional[Dict[str, Any]] = None,
                 symbol: Optional[str] = None,
@@ -404,14 +393,11 @@ def _register_catalog_tools():
                     method=method,
                 )
 
-            # 문서 문자열에 요금제 힌트 노출
             tool.__doc__ = f"{_desc}  |  Plan hint: {_plan}"
-            tool.__name__ = tool_name  # MCP 툴 이름으로 사용
+            tool.__name__ = tool_name
             return tool
 
-        # 동적 등록
         dyn_tool = _factory()
-        # 데코레이터 방식으로 등록
         mcp.tool()(dyn_tool)
 
 _register_catalog_tools()
@@ -420,7 +406,6 @@ _register_catalog_tools()
 # 6) 액세스 점검/목록 도구
 # ──────────────────────────────────────────────────────────────────────────────
 def _check_access(item: Dict[str, Any]) -> Dict[str, Any]:
-    """해당 엔드포인트가 현재 API 키로 접근 가능한지 간단 점검."""
     service = item["service"]
     endpoint = item["endpoint"]
     url_or_path = _norm_path(service, endpoint)
@@ -434,17 +419,11 @@ def _check_access(item: Dict[str, Any]) -> Dict[str, Any]:
         _ = _request_json("GET", url_or_path, params=params, max_retries=1)
         return {"ok": True, "error": None}
     except Exception as e:
-        # 오류메시지 앞부분만
         msg = str(e)
         return {"ok": False, "error": msg[:200]}
 
 @mcp.tool()
 def list_fmp_endpoints(category: Optional[str] = None, run_check: bool = False) -> List[Dict[str, Any]]:
-    """
-    FMP 카탈로그 목록 반환.
-    - category: 현재는 카탈로그가 간단하여 무시됨(필요 시 확장)
-    - run_check=True면 각 엔드포인트에 대한 접근성(현재 키 기준)을 실시간으로 확인
-    """
     out: List[Dict[str, Any]] = []
     for item in FMP_CATALOG:
         row = {
@@ -456,20 +435,15 @@ def list_fmp_endpoints(category: Optional[str] = None, run_check: bool = False) 
             "default_params": item.get("default_params", {}),
         }
         if run_check:
-            row["access"] = _check_access(item)  # {"ok": bool, "error": str|None}
+            row["access"] = _check_access(item)
         out.append(row)
     return out
 
 @mcp.tool()
 def test_endpoint_access(service: str, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    임의 엔드포인트 접근성 테스트(현재 API 키 기준).
-    예) service='stable', endpoint='quote', params={'symbol':'AAPL'}
-    """
     try:
         url_or_path = _norm_path(service, endpoint)
         data = _request_json("GET", url_or_path, params=params or {}, max_retries=1)
-        # 응답이 크면 요약
         small = data
         try:
             if isinstance(data, list) and len(data) > 3:
@@ -481,7 +455,7 @@ def test_endpoint_access(service: str, endpoint: str, params: Optional[Dict[str,
         return {"ok": False, "error": str(e)[:500]}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7) 자주 쓰는 단축 툴(기존)
+# 7) 단축 툴
 # ──────────────────────────────────────────────────────────────────────────────
 @mcp.tool()
 def search_name(query: str, limit: int = 10, exchange: Optional[str] = None) -> Any:
@@ -521,32 +495,106 @@ def help_doc() -> str:
 def health(_request):
     return PlainTextResponse("OK")
 
-# 스트리머블 HTTP MCP를 /mcp 경로에 마운트
-app = mcp.streamable_http_app()
-app.add_route("/health", health)
+# ──────────────────────────────────────────────────────────────────────────────
+# 9) 스트리머블 HTTP MCP 앱 생성 + CORS/인증/호환 미들웨어
+# ──────────────────────────────────────────────────────────────────────────────
 
+# 9-1) 라이브러리에서 제공하는 Starlette 앱
+app: Starlette = mcp.streamable_http_app()
+
+# 9-2) 헬스 체크 라우트
+app.add_route("/health", health, methods=["GET"])
+
+# 9-3) 프리플라이트 전용(일부 프록시 환경에서 필요)
+def options_ok(_request: Request):
+    return PlainTextResponse("", status_code=200)
+app.add_route("/mcp", options_ok, methods=["OPTIONS"])
+app.add_route("/mcp/", options_ok, methods=["OPTIONS"])
+
+# 9-4) CORS (브라우저에서 직접 붙는 ChatGPT Connectors 지원)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in CORS_ALLOW_ORIGINS if o.strip()],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-API-Key", "Mcp-Session-Id"],
+    expose_headers=["Mcp-Session-Id"],
+    max_age=86400,
+)
+
+# 9-5) Accept 헤더/SSE 및 트레일링 슬래시 호환용 ASGI 미들웨어
+class SSEAcceptAndPathNormalizeMiddleware:
+    """
+    - GET /mcp 요청에서 Accept에 text/event-stream이 빠져 있어도 포함시켜 SSE 연결을 허용
+    - /mcp/ → /mcp 로 내부 경로 정규화(리다이렉트 없이 처리)
+    """
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        method = scope.get("method", "").upper()
+
+        # path 정규화
+        if path == "/mcp/":
+            scope = dict(scope)
+            scope["path"] = "/mcp"
+            scope["raw_path"] = b"/mcp"
+
+        # SSE Accept 보완
+        if path == "/mcp" and method == "GET":
+            headers = [(k.lower(), v) for (k, v) in scope.get("headers", [])]
+            accept_idx = next((i for i, (k, _) in enumerate(headers) if k == b"accept"), None)
+            if accept_idx is not None:
+                k, v = headers[accept_idx]
+                val = v.decode("latin-1").lower()
+                if "text/event-stream" not in val:
+                    val = (val + ",text/event-stream").strip(",")
+                    headers[accept_idx] = (k, val.encode("latin-1"))
+            else:
+                headers.append((b"accept", b"text/event-stream"))
+            scope = dict(scope)
+            scope["headers"] = headers
+
+        return await self.app(scope, receive, send)
+
+app.add_middleware(SSEAcceptAndPathNormalizeMiddleware)  # type: ignore
+
+# 9-6) 인증 미들웨어(선택 적용)
 class MCPApiKeyAuthMiddleware(BaseHTTPMiddleware):
     """
-    /mcp 요청에 대해 서버 전용 API 키를 요구하는 미들웨어.
+    /mcp 요청에 대해 서버 전용 API 키를 '선택적으로' 요구하는 미들웨어.
+    - REQUIRE_MCP_AUTH=1 인 경우에만 강제
     - 허용: /health (무인증)
-    - 보호: /mcp 하위 경로 전부
+    - 허용: GET /mcp (SSE) — 초기 연결 호환을 위해 항상 허용
     - 키 전달 방법:
-        1) 헤더: X-API-Key: <key>
-        2) 헤더: Authorization: Bearer <key>
-        3) 쿼리: ?api_key=<key>   (권장하지 않지만 편의상 허용)
+        1) Authorization: Bearer <key>
+        2) X-API-Key: <key>
+        3) (편의) ?api_key=<key>
     """
-    def __init__(self, app, api_key: str):
+    def __init__(self, app: ASGIApp, api_key: Optional[str]):
         super().__init__(app)
         self.api_key = api_key
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.rstrip("/")
+        method = request.method.upper()
 
-        # 1) 헬스체크는 항상 통과
+        # 항상 허용
         if path == "/health":
             return await call_next(request)
 
-        # 2) /mcp 보호
+        # 미강제 모드면 통과
+        if not REQUIRE_MCP_AUTH:
+            return await call_next(request)
+
+        # GET /mcp(SSE)는 무조건 허용하여 초기 연결 실패를 방지
+        if path == "/mcp" and method == "GET":
+            return await call_next(request)
+
+        # 나머지 /mcp* 는 인증
         if path.startswith("/mcp"):
             key = request.headers.get("x-api-key")
             if not key:
@@ -556,16 +604,15 @@ class MCPApiKeyAuthMiddleware(BaseHTTPMiddleware):
             if not key:
                 key = request.query_params.get("api_key")
 
-            if not key or not hmac.compare_digest(key, self.api_key):
+            if not key or not self.api_key or not hmac.compare_digest(key, self.api_key):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
         return await call_next(request)
 
 app.add_middleware(MCPApiKeyAuthMiddleware, api_key=PRODUCT_API_KEY)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# 9) 실행(로컬/Render)
+# 10) 실행(로컬/Render)
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
