@@ -587,6 +587,12 @@ def fmp_call(
         body = e.response.text
         classified = _classify_fmp_http_error(service, endpoint, st, body)
 
+        print(
+            f"[FMP-MCP][HTTP_ERROR] code={classified.get('code')} "
+            f"status={classified.get('status')} "
+            f"endpoint={endpoint}"
+        )
+
         return _make_error(
             classified.get("code", "UNKNOWN"),
             classified.get("message", ""),
