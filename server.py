@@ -474,6 +474,61 @@ def _classify_fmp_http_error(service: str, endpoint: str, status: int, body_text
         "service": service,
     }
 
+
+
+FMP_ERROR_CODES: Dict[str, str] = {
+    "MISSING_API_KEY": "FMP API Key 가 설정되지 않았습니다.",
+    "AUTH_INVALID": "FMP API Key 가 유효하지 않습니다.",
+    "PAYMENT_REQUIRED": "요금제 결제가 필요합니다.",
+    "PLAN_OR_PERMISSION": "현재 요금제로는 해당 엔드포인트에 접근할 수 없습니다.",
+    "RATE_LIMIT": "FMP 호출이 너무 잦아 제한에 걸렸습니다.",
+    "NOT_FOUND": "요청한 리소스를 찾지 못했습니다.",
+    "UPSTREAM_ERROR": "FMP 서버에서 오류가 발생했습니다.",
+    "CLIENT_ERROR": "MCP 내부 오류입니다.",
+    "NO_SESSION": "MCP 세션을 찾지 못했습니다.",
+    "EMPTY_KEY": "빈 FMP API Key 입니다.",
+}
+
+
+def _make_error(
+    code: str,
+    message: str,
+    *,
+    status: Optional[int] = None,
+    needs_user_confirmation: bool = False,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """
+    LLM 친화적인 표준 에러 페이로드 생성기.
+
+    반환 형식 예시:
+    {
+      "_error": {...},
+      "_error_code": "MISSING_API_KEY",
+      "_error_message": "..."
+    }
+    """
+    payload: Dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "needs_user_confirmation": needs_user_confirmation,
+    }
+    if status is not None:
+        payload["status"] = status
+
+    # None 값은 제거
+    for k, v in list(extra.items()):
+        if v is not None:
+            payload[k] = v
+
+    return {
+        "_error": payload,
+        "_error_code": code,
+        "_error_message": message,
+    }
+
+
+
 def _error_payload_from_exception(e: Exception) -> Dict[str, Any]:
     try:
         msg = e.args[0] if e.args else ""
@@ -512,15 +567,13 @@ def fmp_call(
     # 사용자 키 확인
     user_key = _resolve_user_fmp_key(qp)
     if not user_key:
-        return {
-            "_error": {
-                "code": "MISSING_API_KEY",
-                "needs_user_confirmation": False,
-                "suggest_web_search": True,
-                "message": "MCP URL에 ?apiKey=... 로 FMP 키를 전달해야 합니다. 현재 키가 없어 API로는 답변을 제공할 수 없으며, 공개 웹 검색으로 참고 값을 제시할 수 있습니다.",
-                "explain_to_user": "MCP 서버 등록 시 URL 끝에 ?apiKey=<YOUR_FMP_KEY>를 포함해 주세요."
-            }
-        }
+        return _make_error(
+            "MISSING_API_KEY",
+            "MCP URL에 ?apiKey=... 로 FMP 키를 전달해야 합니다. 현재 키가 없어 API로는 답변을 제공할 수 없으며, 공개 웹 검색으로 참고 값을 제시할 수 있습니다.",
+            needs_user_confirmation=False,
+            suggest_web_search=True,
+            explain_to_user="MCP 서버 등록 시 URL 끝에 ?apiKey=<YOUR_FMP_KEY>를 포함해 주세요.",
+        )
 
     qp["apikey"] = user_key  # 사용자 키 강제
 
@@ -530,9 +583,25 @@ def fmp_call(
         st = e.response.status_code
         body = e.response.text
         classified = _classify_fmp_http_error(service, endpoint, st, body)
-        return {"_error": classified}
+
+        return _make_error(
+            classified.get("code", "UNKNOWN"),
+            classified.get("message", ""),
+            status=classified.get("status"),
+            needs_user_confirmation=classified.get("needs_user_confirmation", False),
+            plan_hint=classified.get("plan_hint"),
+            suggested_action=classified.get("suggested_action"),
+            endpoint=classified.get("endpoint"),
+            service=classified.get("service"),
+        )
     except Exception as e:
-        return {"_error": _error_payload_from_exception(e)}
+        payload = _error_payload_from_exception(e)
+        return _make_error(
+            payload.get("code", "CLIENT_ERROR"),
+            payload.get("message", ""),
+            needs_user_confirmation=payload.get("needs_user_confirmation", False),
+        )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5) 카탈로그 기반 동적 툴 등록
@@ -763,10 +832,10 @@ def set_fmp_api_key(api_key: str) -> Dict[str, Any]:
     """
     sid = CURRENT_SESSION_ID.get()
     if not sid:
-        return {"ok": False, "_error": {"code": "NO_SESSION", "message": "세션 ID를 찾을 수 없습니다."}}
+        return {"ok": False, **_make_error("NO_SESSION", FMP_ERROR_CODES.get("NO_SESSION", "세션 ID를 찾을 수 없습니다."))}
     key = (api_key or "").strip()
     if not key:
-        return {"ok": False, "_error": {"code": "EMPTY_KEY", "message": "빈 API Key입니다."}}
+        return {"ok": False, **_make_error("EMPTY_KEY", FMP_ERROR_CODES.get("EMPTY_KEY", "빈 API Key입니다."))}
     SESSION_FMP_KEYS[sid] = key
     return {"ok": True}
 
@@ -777,7 +846,7 @@ def clear_fmp_api_key() -> Dict[str, Any]:
     """
     sid = CURRENT_SESSION_ID.get()
     if not sid:
-        return {"ok": False, "_error": {"code": "NO_SESSION", "message": "세션 ID를 찾을 수 없습니다."}}
+        return {"ok": False, **_make_error("NO_SESSION", FMP_ERROR_CODES.get("NO_SESSION", "세션 ID를 찾을 수 없습니다."))}
     SESSION_FMP_KEYS.pop(sid, None)
     return {"ok": True}
 
