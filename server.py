@@ -521,11 +521,14 @@ def _make_error(
         if v is not None:
             payload[k] = v
 
+    print(f"[FMP-MCP][ERROR] code={code}")
+
     return {
         "_error": payload,
         "_error_code": code,
         "_error_message": message,
     }
+
 
 
 
